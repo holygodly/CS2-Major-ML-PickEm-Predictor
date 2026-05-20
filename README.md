@@ -1,144 +1,147 @@
-# CS2 Major 预测系统 (ML 版)
+# CS2 Major Prediction System (ML Version)
 
-基于机器学习的CS2 Major预测系统。核心是 XGBoost 地图级胜率模型+Isotonic概率校准,配合v社瑞士轮规则和蒙特卡洛模拟,预测瑞士轮每队 3-0 / 晋级 / 0-3 概率并暴搜最优作业,也能模拟淘汰赛冠军概率。
+**English** | [中文](README_CN.md)
 
-[上一版](https://github.com/holygodly/CS2_Major_Swiss_System_Predictor)用纯ELO算实力,这一版把ELO换成了XGBoost学的地图级模型,能区分某队在不同地图上的强弱。哪个版本更好见仁见智吧，也欢迎ML大佬们来优化模型。
+A machine-learning based CS2 Major prediction system. The core is an XGBoost map-level win-rate model + Isotonic probability calibration, combined with Valve Swiss stage rules and Monte Carlo simulation. It predicts each team's 3-0 / advance / 0-3 probabilities in the Swiss stage, brute-forces the best Pick'em picks, and can also simulate playoff champion probabilities.
 
-## 快速开始
+The [previous version](https://github.com/holygodly/CS2_Major_Swiss_System_Predictor) used pure ELO to calculate team strength. This version replaces ELO with a map-level model learned by XGBoost, so it can distinguish whether a team is strong on Mirage, weak on Nuke, and so on. Which version is better is up to each person, and ML experts are welcome to improve the model.
 
-### 1. 配置
+## Quick Start
 
-瑞士轮预测,编辑 `config.yaml` 的 `swiss_stage`:
+### 1. Configuration
+
+For Swiss stage prediction, edit `swiss_stage` in `config.yaml`:
 
 ```yaml
 swiss_stage:
-  seeded_teams:          # 可不填。不填就从下面的首轮对阵自动反推(每场前者=种子1-8,后者=种子9-16)
-    - 队伍1              # 想手动指定就按官方种子1-16顺序填满16支
+  seeded_teams:          # Optional. If empty, inferred from the opening matchups below
+                         # (the first team in each match = seeds 1-8, second team = seeds 9-16).
+    - Team1              # If you want to set it manually, fill all 16 teams in official seed order.
     - ...
-  round1_matchups:       # 8场首轮BO1,按场次顺序填,每场高种子写前面、低种子写后面
-    - [队伍1, 队伍9]      # 第1场:队伍1=种子1,队伍9=种子9
+  round1_matchups:       # 8 opening BO1 matches, in match order. Put high seed first, low seed second.
+    - [Team1, Team9]     # Match 1: Team1 = seed 1, Team9 = seed 9
     - ...
 ```
 
-种子顺序只影响 R2 之后 Buchholz 配对的tiebreaker,ELO和特征都是按队名从数据自动提取的,跟种子无关。
+Seed order only affects the Buchholz pairing tiebreaker after R2. ELO and features are automatically extracted from the data by team name, and have nothing to do with seed order.
 
-淘汰赛预测,编辑 `config.yaml` 的 `tournament`:
+For playoff prediction, edit `tournament` in `config.yaml`:
 
 ```yaml
 tournament:
-  name: "赛事名称"       # 写不写无所谓
-  map_pool: null         # 自动从数据提取,或手动指定 ['Ancient', 'Inferno', ...]
-  quarterfinals:         # 根据赛程自己填,系统自动从数据提取 ELO 和特征,不用管 V 社积分
-    - [队伍A, 队伍B]      # QF1
-    - [队伍C, 队伍D]      # QF2
-    - [队伍E, 队伍F]      # QF3
-    - [队伍G, 队伍H]      # QF4
-  semifinal_pairs: [[0, 3], [1, 2]]   # QF1胜者vsQF4胜者, QF2胜者vsQF3胜者
+  name: "Tournament Name"       # Optional
+  map_pool: null                # Auto-detect from data, or set manually: ['Ancient', 'Inferno', ...]
+  quarterfinals:                # Fill this from the schedule. The system extracts ELO and features from data.
+    - [TeamA, TeamB]            # QF1
+    - [TeamC, TeamD]            # QF2
+    - [TeamE, TeamF]            # QF3
+    - [TeamG, TeamH]            # QF4
+  semifinal_pairs: [[0, 3], [1, 2]]   # QF1 winner vs QF4 winner, QF2 winner vs QF3 winner
 ```
 
-### 2. 运行预测
+### 2. Run Prediction
 
 ```bash
-# 瑞士轮预测(主功能,顺带生成图表)
+# Swiss stage prediction (main feature, also generates charts)
 python run_swiss_ml_prediction.py
 
-# 淘汰赛快速预测(基于ELO,速度快)
+# Fast playoff prediction (ELO-based, faster)
 python run_quick_prediction.py
 
-# 淘汰赛完整预测(用ML模型,较慢)
+# Full playoff prediction (uses the ML model, slower)
 python run_full_prediction.py
 ```
 
-### 3. 查看结果
+### 3. Check Results
 
-结果保存在 `output/`:
+Results are saved in `output/`:
 
-- `swiss_ml_predictions.json` - 瑞士轮概率 + 作业推荐
-- `charts/` - 可视化图表(晋级概率排名、结果分解、作业卡片、对阵热图)
-- `playoff_predictions_quick.json` / `playoff_predictions_full.json` - 淘汰赛结果
+- `swiss_ml_predictions.json` - Swiss stage probabilities + Pick'em recommendation
+- `charts/` - visualization charts (qualification probability ranking, outcome breakdown, Pick'em card, matchup heatmap)
+- `playoff_predictions_quick.json` / `playoff_predictions_full.json` - playoff results
 
-## 文件结构
+## File Structure
 
 ```
 cs2-major-ml-predictor/
-├── config.yaml                  # 配置(赛事、队伍、模型参数)
-├── swiss_stage_config.yaml      # 瑞士轮种子/首轮赛程备用配置
+├── config.yaml                  # Configuration (tournament, teams, model parameters)
+├── swiss_stage_config.yaml      # Backup config for Swiss stage seeds/opening matchups
 ├── requirements.txt
-├── data_preparation.py          # 数据准备(原始数据 → 地图级数据集)
-├── feature_engineering.py       # 特征工程
-├── model_training.py            # 模型训练 + Isotonic 校准 + 诊断图
-├── hybrid_playoff_predictor.py  # 核心预测器
-├── veto_simulator.py            # Ban/Pick 模拟器
-├── map_side_analyzer.py         # 地图 T/CT 侧分析
-├── pickem_optimizer.py          # 作业暴搜(GPU/CPU)
-├── swiss_simulator_gpu.py       # GPU 瑞士轮模拟
-├── gpu_accelerator.py           # GPU 加速
-├── run_swiss_ml_prediction.py   # 瑞士轮预测入口
-├── run_quick_prediction.py      # 淘汰赛快速预测
-├── run_full_prediction.py       # 淘汰赛完整预测
-├── run_backtest_stages.py       # 历史 Major 回测
-├── generate_charts.py           # 生成图表
-├── data/                        # 数据集(流水线生成)
-├── models/                      # 训练产物（model_training.py 生成，含 XGBoost + Isotonic 校准器）
-├── output/                      # 预测输出
-└── docs/major-rulebook.md       # Valve 官方规则手册
+├── data_preparation.py          # Data preparation (raw data -> map-level dataset)
+├── feature_engineering.py       # Feature engineering
+├── model_training.py            # Model training + Isotonic calibration + diagnostic charts
+├── hybrid_playoff_predictor.py  # Core predictor
+├── veto_simulator.py            # Ban/Pick simulator
+├── map_side_analyzer.py         # Map T/CT side analysis
+├── pickem_optimizer.py          # Pick'em brute-force search (GPU/CPU)
+├── swiss_simulator_gpu.py       # GPU Swiss stage simulation
+├── gpu_accelerator.py           # GPU acceleration
+├── run_swiss_ml_prediction.py   # Swiss stage prediction entrypoint
+├── run_quick_prediction.py      # Fast playoff prediction
+├── run_full_prediction.py       # Full playoff prediction
+├── run_backtest_stages.py       # Historical Major backtest
+├── generate_charts.py           # Generate charts
+├── data/                        # Dataset (generated by the pipeline)
+├── models/                      # Training outputs (generated by model_training.py, including XGBoost + Isotonic calibrator)
+├── output/                      # Prediction outputs
+└── docs/major-rulebook.md       # Valve official rulebook
 ```
 
-## 重新训练模型
+## Retrain the Model
 
-爬好数据(见下面「数据来源」)后,依次跑:
+After scraping the data (see "Data Source" below), run these in order:
 
 ```bash
-# 1. 准备数据
+# 1. Prepare data
 python data_preparation.py
 
-# 2. 特征工程
+# 2. Feature engineering
 python feature_engineering.py
 
-# 3. 训练模型
+# 3. Train model
 python model_training.py
 ```
 
-## 数据来源
+## Data Source
 
-训练数据是我自己写的 HLTV 爬虫爬的,爬虫不方便公开,**大家可自行爬取**。数据全部来自 HLTV 比赛页(`hltv.org/matches/...`)。爬好的数据路径可在 `config.yaml` 的 `data.data_dir` 改,需要下面三个文件,字段格式如下,照着抓就行。
+The training data was scraped from HLTV by a crawler I wrote myself. The crawler is not convenient to publish, so everyone can scrape the data by themselves. All data comes from HLTV match pages (`hltv.org/matches/...`). You can change the scraped data path in `config.yaml` under `data.data_dir`. The three files below are needed, and the field formats are listed here so you can scrape according to them.
 
-### 1. `results_all_matches.csv` — 比赛列表
+### 1. `results_all_matches.csv` - Match List
 
-一行一场比赛,从 HLTV results 列表页抓。
+One row per match, scraped from the HLTV results list page.
 
-| 字段 | 说明 | 例 |
+| Field | Description | Example |
 |---|---|---|
-| `match_id` | HLTV 比赛 ID(URL 里那串数字) | `2380799` |
-| `index` | 序号,自己生成即可 | `1` |
-| `type` | 赛制 | `BO1` / `BO3` / `BO5` |
-| `team1` / `team2` | 对阵双方队名 | `FaZe` |
-| `team1_score` / `team2_score` | 大比分(赢了几张图) | `2` |
-| `date` | 比赛日期 | `2026-05-17` |
-| `url` | 比赛页完整链接 | `https://www.hltv.org/matches/...` |
+| `match_id` | HLTV match ID (the number in the URL) | `2380799` |
+| `index` | Index, can be generated locally | `1` |
+| `type` | Match format | `BO1` / `BO3` / `BO5` |
+| `team1` / `team2` | Team names | `FaZe` |
+| `team1_score` / `team2_score` | Series score (maps won) | `2` |
+| `date` | Match date | `2026-05-17` |
+| `url` | Full match page URL | `https://www.hltv.org/matches/...` |
 
-### 2. `player_stats.csv` — 选手数据(模型主要靠这个)
+### 2. `player_stats.csv` - Player Stats (the model mainly relies on this)
 
-一行 = 一个选手在某场某张图某个阵营的数据,一场比赛有很多行(选手 × 地图 × Both/T/CT),从比赛页 stats 表抓。
+One row = one player's stats on one match, one map, and one side. A match has many rows (players x maps x Both/T/CT), scraped from the stats table on the match page.
 
-| 字段 | 说明 | 例 |
+| Field | Description | Example |
 |---|---|---|
-| `match_id` / `match_index` / `match_date` / `match_type` | 比赛基本信息 | |
-| `team1` / `team2` | 对阵双方 | |
-| `team` | 这名选手所属队 | `FaZe` |
-| `player_id` / `player_name` | 选手 ID 和昵称 | `karrigan` |
-| `map_name` | `All maps` 或具体地图 | `Dust2` |
-| `side` | 阵营 | `Both` / `T` / `CT` |
-| `kills` / `deaths` | 击杀 / 死亡 | |
-| `plus_minus` | 净胜(+/-) | |
-| `adr` | 场均伤害 | `77.3` |
-| `kast` | KAST 百分比 | `83.3` |
-| `rating` | HLTV Rating(**模型最看重的特征**) | `1.18` |
-| `match_url` | 比赛页链接 | |
+| `match_id` / `match_index` / `match_date` / `match_type` | Basic match information | |
+| `team1` / `team2` | Match teams | |
+| `team` | This player's team | `FaZe` |
+| `player_id` / `player_name` | Player ID and nickname | `karrigan` |
+| `map_name` | `All maps` or a specific map | `Dust2` |
+| `side` | Side | `Both` / `T` / `CT` |
+| `kills` / `deaths` | Kills / deaths | |
+| `plus_minus` | Kill difference (+/-) | |
+| `adr` | Average damage per round | `77.3` |
+| `kast` | KAST percentage | `83.3` |
+| `rating` | HLTV Rating (**the feature the model values the most**) | `1.18` |
+| `match_url` | Match page URL | |
 
-### 3. `match_details_lite.json` — 比赛详情(地图 / veto / 比分)
+### 3. `match_details_lite.json` - Match Details (maps / veto / scores)
 
-一个 dict,**key 是比赛 URL**,value 结构如下:
+A dict where **the key is the match URL** and the value has this structure:
 
 ```jsonc
 {
@@ -147,20 +150,20 @@ python model_training.py
     "team1": "-72c", "team2": "Lynn Vision",
     "team1_score": "0", "team2_score": "1", "date": "2026-05-17",
     "details": {
-      "veto_steps": [                       // ban/pick 流程
+      "veto_steps": [                       // ban/pick process
         {"step": 1, "team": "-72c", "action": "removed", "map": "Inferno"}
         // action: removed / picked / leftover
       ],
-      "maps": [                             // 每张实际打的地图
+      "maps": [                             // maps actually played
         {
           "map_name": "Dust2",
           "team1": "-72c", "team2": "Lynn Vision",
-          "picker": "Unknown",              // 谁选的这张图
-          "score": "6 - 13",                // 该图最终比分
+          "picker": "Unknown",              // who picked this map
+          "score": "6 - 13",                // final score on this map
           "winner": "team2",
-          "half_score": "(4:8;2:5)",        // 上下半场
+          "half_score": "(4:8;2:5)",        // first half / second half
           "half1_t_ct": "4:8", "half2_t_ct": "2:5",
-          "team1_half1_side": "T",  "team2_half1_side": "CT",   // 半场阵营,用于 T/CT 侧分析
+          "team1_half1_side": "T",  "team2_half1_side": "CT",   // half-side info for T/CT analysis
           "team1_half2_side": "CT", "team2_half2_side": "T"
         }
       ],
@@ -170,40 +173,40 @@ python model_training.py
 }
 ```
 
-模型用得最多的:`player_stats.csv` 的 `rating` / `adr` / `kast`,以及 `match_details` 里每张图的 `score` / `winner` / `picker` / 半场阵营(算 T/CT 侧优势)。其它字段没爬到给默认值也能跑,但 rating 和地图比分这两块最好齐全。
+The model uses these the most: `rating` / `adr` / `kast` from `player_stats.csv`, and each map's `score` / `winner` / `picker` / half-side info from `match_details` (used for T/CT side advantage). Missing optional fields can fall back to defaults, but rating and map scores should be as complete as possible.
 
-## 预测原理
+## Prediction Logic
 
-1. **ELO 评分**:从历史比赛动态计算,含时间衰减和自适应 K 因子(用于淘汰赛快速 baseline 和特征初始化)
-2. **特征工程**:每张地图构 ~40 维特征 —— 地图胜率、H2H、选手 Rating、近期状态、阵容稳定性及其差值,全部带 30 天半衰期时间衰减 + Beta 平滑
-3. **XGBoost 模型**:预测单张地图胜率(核心),自动调正则 + early stopping + 时间加权 + BO1 上采样
-4. **Isotonic 校准**:5 折 OOF 拟合,修正概率偏差
-5. **Ban/Pick 模拟**:Softmax 概率化模拟真实 Veto + T/CT 侧优势
-6. **蒙特卡洛模拟**:跑 50 万次瑞士轮,统计战绩概率分布
-7. **作业 暴搜**:在模拟结果上暴搜约 1000 万种组合,挑命中率最高的
+1. **ELO rating**: dynamically calculated from historical matches, with time decay and adaptive K factor (used for the fast playoff baseline and feature initialization)
+2. **Feature engineering**: about 40 features per map, including map win rate, H2H, player Rating, recent form, roster stability and their differences, all with 30-day half-life time decay + Beta smoothing
+3. **XGBoost model**: predicts single-map win probability (core), with automatic regularization adjustment + early stopping + time weighting + BO1 upsampling
+4. **Isotonic calibration**: 5-fold OOF fitting to correct probability bias
+5. **Ban/Pick simulation**: softmax probability-based simulation of real veto + T/CT side advantage
+6. **Monte Carlo simulation**: runs 500k Swiss stage simulations and records final record probability distribution
+7. **Pick'em brute force**: brute-forces about 10 million combinations on the simulation results and picks the one with the highest hit rate
 
-## 回测结果
+## Backtest Results
 
-目前的作业规则是:要选 10 个队,分三组、不能重复 
+The current Pick'em rule is: choose 10 teams, split into three groups, with no duplicates.
 
-- **2 个 3-0**(三胜零负)
-- **6 个晋级**(3-1 或 3-2 出线)
-- **2 个 0-3**(三连败出局)
+- **2 teams for 3-0** (three wins, zero losses)
+- **6 teams to advance** (3-1 or 3-2)
+- **2 teams for 0-3** (three straight losses)
 
-命中 ≥5 个算过线。系统在几十万次模拟结果上暴搜全部约1000万种合法组合(`C(16,6)·C(10,2)·C(8,2)`),挑"命中 ≥5"概率最高的那套,**这个概率就是预期通过率**。
+At least 5 correct picks are needed to pass. The system brute-forces about 10 million legal combinations (`C(16,6)·C(10,2)·C(8,2)`) on hundreds of thousands of simulation results, and chooses the lineup with the highest probability of "at least 5 hits". **That probability is the expected pass rate.**
 
-用 2025 年底那届 Major 回测(只用赛前数据训练),最优作业的预期通过率:
+Using a late-2025 Major backtest (trained only on pre-event data), the expected pass rates of the best Pick'em were:
 
-- 第一阶段:约 54%(本算法最后命中 2/10,没过)
-- 第二阶段:约 42%(本算法最后命中 5/10,过了)
+- Stage 1: about 54% (this algorithm ended with 2/10 hits, failed)
+- Stage 2: about 42% (this algorithm ended with 5/10 hits, passed)
 
-预期通过率是模型自己估的概率;真实一届就是一次抽样,方差很大,所以会出现"预期高的那次反而没过"。第一阶段是开赛阶段,爆冷最多,哪怕最优解也就五成出头。反观我当时的ELO算法，第一阶段和第二阶段都过了，哪种办法好大家见仁见智吧。。。训练集 5 折交叉验证准确率约 0.56,地图级预测做到这感觉差不多到顶了，欢迎ML大佬的建议。
+The expected pass rate is the probability estimated by the model. A real Major is only one sample, and the variance is very large, so it is possible that "the one with the higher expectation fails instead". Stage 1 is the opening stage, where upsets are the most common. Even the best solution is only a little above fifty percent. In contrast, my ELO algorithm at that time passed both Stage 1 and Stage 2, so which method is better is up to each person... The training set 5-fold cross-validation accuracy is about 0.56. For map-level prediction, this feels close to the ceiling, but suggestions from ML experts are welcome.
 
-## 注意事项
+## Notes
 
-- 队伍名称必须与数据中的名称完全一致,否则查不到该队特征,默认按 0.5 算
-- 地图池自动从数据中提取,换图只改 config
-- 支持 GPU 加速(需要 CUDA),无显卡自动回退 CPU
-- 瑞士轮前几轮 BO1,生死局/晋级局 BO3,系统自动判定
-- Windows 中文环境若报 GBK 编码错,加 `PYTHONUTF8=1` 运行
-- 项目纯整活，千万不要当真，预测结果仅供娱乐参考，别拿去赌钱啥的！！祝大家作业都必过！
+- Team names must match the names in the data exactly. Otherwise the team features cannot be found, and the default 0.5 value is used.
+- The map pool is automatically extracted from data. If the map pool changes, just change `config`.
+- GPU acceleration is supported (CUDA required). If there is no GPU, it automatically falls back to CPU.
+- Early Swiss rounds are BO1, and elimination/advancement matches are BO3. The system decides this automatically.
+- If Windows Chinese environment reports a GBK encoding error, run with `PYTHONUTF8=1`.
+- This project is just for fun. Do not take it too seriously. Prediction results are for entertainment only. Do not use them for betting or anything like that!! Good luck with your Pick'em!
