@@ -1,0 +1,40 @@
+# Swiss-stage ML manual setup
+#
+# Legacy fallback only. The primary plug-and-play config now lives in
+# config.yaml under swiss_stage.
+#
+# seeded_teams:
+#   Used for Buchholz tie-break order in later rounds.
+#   The list order is the seed order.
+#
+# round1_matchups:
+#   This is the authoritative manual Round 1 schedule for the ML Swiss runner.
+#   Edit these matchups directly when the official schedule is announced.
+
+seeded_teams:
+  - FURIA
+  - Vitality
+  - Falcons
+  - The MongolZ
+  - MOUZ
+  - Spirit
+  - G2
+  - paiN
+  - Natus Vincere
+  - FaZe
+  - B8
+  - Imperial
+  - PARIVISION
+  - Liquid
+  - Passion UA
+  - 3DMAX
+
+round1_matchups:
+  - [FURIA, Natus Vincere]
+  - [Vitality, FaZe]
+  - [Falcons, B8]
+  - [The MongolZ, Imperial]
+  - [MOUZ, PARIVISION]
+  - [Spirit, Liquid]
+  - [G2, Passion UA]
+  - [paiN, 3DMAX]

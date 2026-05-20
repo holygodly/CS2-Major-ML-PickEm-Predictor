@@ -1,0 +1,157 @@
+# ML 预测总配置
+#
+# 正式预测时主要改这一段：赛事名、图池、瑞士轮队伍/首轮赛程、淘汰赛对阵、
+# 以及瑞士轮/淘汰赛模拟次数。下面的数据、模型和评估参数一般不用临场改。
+
+# ==================== 用户配置区：正式预测主要改这里 ====================
+tournament:
+  name: "Austin Major 2025"
+  
+  # Major 官方图池；如果赛事换图，只改这里。
+  # 设为 null 时，从近期历史数据中取 7 张图。
+  map_pool:
+    - Dust2
+    - Inferno
+    - Mirage
+    - Nuke
+    - Ancient
+    - Anubis
+    - Overpass
+  
+  # 淘汰赛对阵：官方 playoff 赛程出来后按 QF1-QF4 填。
+  quarterfinals:
+    - [Spirit, Falcons]
+    - [FURIA, Natus Vincere]
+    - [MOUZ, FaZe]
+    - [Vitality, The MongolZ]
+  
+  # 半决赛配对规则：0=QF1, 1=QF2, 2=QF3, 3=QF4。
+  semifinal_pairs: [[0, 3], [1, 2]]
+
+swiss_stage:
+  # 瑞士轮种子顺序：用于后续轮次 Buchholz/tiebreak 排序。
+  seeded_teams:
+    - FURIA
+    - Vitality
+    - Falcons
+    - The MongolZ
+    - MOUZ
+    - Spirit
+    - G2
+    - paiN
+    - Natus Vincere
+    - FaZe
+    - B8
+    - Imperial
+    - PARIVISION
+    - Liquid
+    - Passion UA
+    - 3DMAX
+
+  # 瑞士轮第一轮赛程：官方公布后手动填这里，程序从第二轮开始推演。
+  round1_matchups:
+    - [FURIA, Natus Vincere]
+    - [Vitality, FaZe]
+    - [Falcons, B8]
+    - [The MongolZ, Imperial]
+    - [MOUZ, PARIVISION]
+    - [Spirit, Liquid]
+    - [G2, Passion UA]
+    - [paiN, 3DMAX]
+
+simulation:
+  # 模拟次数：填正整数会强制使用该值；填 0 / null / 'auto' 用脚本默认值。
+  num_simulations: 0       # 0=auto
+  swiss_num_simulations: 0
+  playoff_num_simulations: 0
+
+# ==================== 数据配置 ====================
+data:
+  # 数据目录（读取以下文件）
+  data_dir: '../HLTV/data'
+  
+  # 数据文件模式（使用glob匹配）
+  match_details_pattern: 'match_details_lite.json'    # 比赛详情JSON
+  results_pattern: 'results_all_matches.csv'          # 比赛列表CSV
+  player_stats_pattern: 'player_stats.csv'            # 选手数据CSV
+  
+  # 数据处理参数
+  min_maps_per_team: 5          # 每支队伍最少地图数
+  recent_days_window: 60         # 最近N天的数据
+  data_end_date: null           # 只用此日期及之前的数据；null=用全部（正式预测用 null，回测时填赛前日期）
+  train_cutoff_date: null        # 训练/测试分界日期；null=按下面的比例切分（回测时填具体日期做时间外验证）
+  train_test_split: 0.15         # 验证集比例（仅 train_cutoff_date 为 null 时生效）
+  sample_weight_half_life_days: 60  # 训练样本时间衰减半衰期（天）
+
+features:
+  # 特征工程参数
+  map_features:
+    - team_map_win_rate           # 队伍地图胜率
+    - team_map_avg_rounds         # 平均回合数
+    - team_ct_win_rate            # CT侧胜率
+    - team_t_win_rate             # T侧胜率
+    - opponent_map_win_rate       # 对手地图胜率
+    - head_to_head_map            # 直接对抗
+    - map_pick_advantage          # Pick优势
+    - recent_5_maps_win_rate      # 最近5张地图胜率
+    
+  player_features:
+    - avg_rating                  # 平均Rating
+    - avg_adr                     # 平均ADR
+    - avg_kast                    # 平均KAST
+    - top_fragger_rating          # 最高Rating
+    - rating_std                  # Rating标准差（稳定性）
+    - form_trend                  # 趋势（LSTM输出）
+    
+  momentum_features:
+    - previous_map_result         # 上一张地图结果
+    - score_in_series             # 系列赛比分（0-0, 1-0, 1-1等）
+    - comeback_indicator          # 翻盘指标（半场落后反转）
+    - close_game_indicator        # 接近比赛（加时赛）
+    - win_streak                  # 连胜场次
+    
+  context_features:
+    - match_importance            # 比赛重要性（QF/SF/Final）
+    - days_since_last_match       # 距离上场比赛天数
+    - tournament_stage            # 赛事阶段
+    - bo_format                   # BO3/BO5
+
+models:
+  xgboost:
+    n_estimators: 300
+    max_depth: 8
+    learning_rate: 0.03
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 3
+    gamma: 0.1
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    device: 'auto'                # 'auto'=自动选GPU | 'cuda:0'=指定GPU | 'cpu'=只用CPU
+    
+  lstm:
+    sequence_length: 10           # 使用最近10场比赛
+    hidden_units: 64
+    dropout: 0.3
+    epochs: 50
+    batch_size: 32
+    learning_rate: 0.001
+    
+  hybrid:
+    xgboost_weight: 0.70          # XGBoost权重
+    lstm_weight: 0.20             # LSTM权重
+    elo_weight: 0.10              # 传统ELO权重
+
+evaluation:
+  cross_validation_folds: 5
+  metrics:
+    - accuracy
+    - log_loss
+    - roc_auc
+    - brier_score
+  
+  comparison:
+    baseline_methods:
+      - traditional_elo
+      - simple_win_rate
+      - hltv_rating_only

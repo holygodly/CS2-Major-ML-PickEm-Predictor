@@ -1,0 +1,39 @@
+# CS2 Major ML predictor
+
+# GPU / CUDA
+xgboost>=2.0.0         # 必须2.0+才支持gpu_hist
+torch>=2.0.0           # 用于CUDA检测
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 机器学习
+scikit-learn>=1.3.0    # 特征缩放、交叉验证、Isotonic 校准
+joblib>=1.3.0          # 模型序列化
+
+# 可视化
+matplotlib>=3.5.0      # 训练诊断图 + 预测图表
+
+# 配置与工具
+PyYAML>=6.0
+tqdm>=4.65.0
+
+# ============================================
+# GPU环境要求
+# ============================================
+# - NVIDIA GPU with CUDA Compute Capability 3.5+
+# - CUDA Toolkit 11.0+ (for XGBoost GPU support)
+# - cuDNN 8.0+ (optional, for better performance)
+
+# ============================================
+# 安装说明
+# ============================================
+# 1. 基础安装: pip install -r requirements.txt
+# 2. GPU加速:
+#    - 安装CUDA Toolkit: https://developer.nvidia.com/cuda-downloads
+#    - 验证CUDA: nvidia-smi
+#    - XGBoost 检测 GPU 并启用 gpu_hist
+# 3. CPU后备:
+#    - 如果没有GPU，回退到CPU (hist树方法)
+#    - 性能: CPU训练2-5分钟 vs GPU 10-30秒 (10-50x加速)

@@ -1,0 +1,27 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── 运行时产物(每次跑都会重新生成,不进版本)──
+output/*.json
+output/charts/
+config_backtest.yaml          # backtest 临时生成的配置
+backtest_data/                # backtest 临时数据
+
+# ── 本地训练数据 ──
+data/*.csv
+data/*.txt
+# 训练产物
+models/*.json
+models/*.pkl
+models/*.csv
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+*.bak
+*.log
