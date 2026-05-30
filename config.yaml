@@ -5,7 +5,7 @@
 
 # ==================== 用户配置区：正式预测主要改这里 ====================
 tournament:
-  name: "Austin Major 2025"
+  name: "CS2 Major 2026"
   
   # Major 官方图池；如果赛事换图，只改这里。
   # 设为 null 时，从近期历史数据中取 7 张图。
@@ -19,11 +19,7 @@ tournament:
     - Overpass
   
   # 淘汰赛对阵：官方 playoff 赛程出来后按 QF1-QF4 填。
-  quarterfinals:
-    - [Spirit, Falcons]
-    - [FURIA, Natus Vincere]
-    - [MOUZ, FaZe]
-    - [Vitality, The MongolZ]
+  quarterfinals: []
   
   # 半决赛配对规则：0=QF1, 1=QF2, 2=QF3, 3=QF4。
   semifinal_pairs: [[0, 3], [1, 2]]
@@ -31,44 +27,47 @@ tournament:
 swiss_stage:
   # 瑞士轮种子顺序：用于后续轮次 Buchholz/tiebreak 排序。
   seeded_teams:
-    - FURIA
-    - Vitality
-    - Falcons
-    - The MongolZ
-    - MOUZ
-    - Spirit
-    - G2
-    - paiN
-    - Natus Vincere
-    - FaZe
-    - B8
-    - Imperial
-    - PARIVISION
-    - Liquid
-    - Passion UA
-    - 3DMAX
+    - Team1                # 种子1
+    - Team2                # 种子2
+    - Team3                # 种子3
+    - Team4                # 种子4
+    - Team5                # 种子5
+    - Team6                # 种子6
+    - Team7                # 种子7
+    - Team8                # 种子8
+    - Team9                # 种子9
+    - Team10               # 种子10
+    - Team11               # 种子11
+    - Team12               # 种子12
+    - Team13               # 种子13
+    - Team14               # 种子14
+    - Team15               # 种子15
+    - Team16               # 种子16
 
   # 瑞士轮第一轮赛程：官方公布后手动填这里，程序从第二轮开始推演。
   round1_matchups:
-    - [FURIA, Natus Vincere]
-    - [Vitality, FaZe]
-    - [Falcons, B8]
-    - [The MongolZ, Imperial]
-    - [MOUZ, PARIVISION]
-    - [Spirit, Liquid]
-    - [G2, Passion UA]
-    - [paiN, 3DMAX]
+    - [Team1, Team9]
+    - [Team2, Team10]
+    - [Team3, Team11]
+    - [Team4, Team12]
+    - [Team5, Team13]
+    - [Team6, Team14]
+    - [Team7, Team15]
+    - [Team8, Team16]
 
 simulation:
   # 模拟次数：填正整数会强制使用该值；填 0 / null / 'auto' 用脚本默认值。
-  num_simulations: 0       # 0=auto
-  swiss_num_simulations: 0
-  playoff_num_simulations: 0
+  num_simulations: 5000000
+  swiss_num_simulations: 5000000
+  playoff_num_simulations: 5000000
+  swiss_backend: 'gpu'            # 'gpu'=默认瑞士轮加速路径 | 'cpu'=明确使用逐场CPU路径
+  pickem_backend: 'gpu'           # 'gpu'=默认GPU暴搜Pick'Em | 'cpu'=明确使用CPU/NumPy
+  require_gpu: true               # true=要求GPU；如果不可用直接报错，避免悄悄跑CPU
 
 # ==================== 数据配置 ====================
 data:
   # 数据目录（读取以下文件）
-  data_dir: '../HLTV/data'
+  data_dir: './data'
   
   # 数据文件模式（使用glob匹配）
   match_details_pattern: 'match_details_lite.json'    # 比赛详情JSON
@@ -84,6 +83,27 @@ data:
   sample_weight_half_life_days: 60  # 训练样本时间衰减半衰期（天）
 
 features:
+  feature_filter:
+    enabled: true
+    profile: "vrs_elo_sos"
+    exclude_patterns:
+      - "world_rank"
+      - "event_tier"
+      - "stage_importance"
+      - "top10_matchup"
+      - "top30_matchup"
+      - "_ct_"
+      - "_t_"
+      - "side"
+      - "core_age"
+      - "core_matches"
+      - "core_match_share"
+      - "new_player_count"
+      - "player_experience"
+      - "team_history_reliability"
+      - "shell_change_risk"
+      - "farm_core_risk"
+
   # 特征工程参数
   map_features:
     - team_map_win_rate           # 队伍地图胜率
@@ -139,8 +159,13 @@ models:
     
   hybrid:
     xgboost_weight: 0.70          # XGBoost权重
-    lstm_weight: 0.20             # LSTM权重
+    lstm_weight: 0.20             # 兼容旧配置；当前折入 ML 权重，不单独训练 LSTM
     elo_weight: 0.10              # 传统ELO权重
+    enable_form_variance: true    # 每场加入临场波动，避免 BO1 过度相信强弱差
+    form_variance_bo1: 60         # BO1 单图随机性更高
+    form_variance_bo3: 35         # BO3 随机性较低
+    form_variance_bo5: 20         # BO5 更接近长期实力
+    bo1_probability_shrink: 0.85  # BO1 概率向 50% 收缩，给爆冷留空间
 
 evaluation:
   cross_validation_folds: 5

@@ -701,9 +701,17 @@ class ModelTrainer:
         print("=" * 80)
 
         self.load_data()
-        self.select_features()
+        training_cfg = self.config.get("training", {})
+        if training_cfg.get("enable_feature_selection", True):
+            self.select_features()
+        else:
+            print("\n[2/6] 自动特征选择已关闭")
         self.train_xgboost()
-        self.calibrate_model()
+        if training_cfg.get("enable_calibration", True):
+            self.calibrate_model()
+        else:
+            self.calibrator = None
+            print("\n[3.5/6] 概率校准已关闭")
         results = self.evaluate_model()
         self.plot_evaluation_charts()
         self.analyze_feature_importance()

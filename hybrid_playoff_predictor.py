@@ -49,11 +49,23 @@ def calculate_elo_from_data(map_data_df, player_stats_path=None):
     base_elo = 1500
     time_decay_days = 50
     teams = set(df["team1"].unique()) | set(df["team2"].unique())
+    latest_date = df["date"].max()
 
     initial_ratings = {team: base_elo for team in teams}
     if player_stats_path:
         try:
             player_stats = pd.read_csv(player_stats_path, on_bad_lines="skip")
+            if "match_date" in player_stats.columns:
+                player_stats["match_date"] = pd.to_datetime(player_stats["match_date"], errors="coerce")
+                if "match_url" in player_stats.columns:
+                    url_dates = df.groupby("match_url")["date"].first().to_dict()
+                    missing_dates = player_stats["match_date"].isna()
+                    player_stats.loc[missing_dates, "match_date"] = (
+                        player_stats.loc[missing_dates, "match_url"].map(url_dates)
+                    )
+                player_stats = player_stats[
+                    player_stats["match_date"].notna() & (player_stats["match_date"] <= latest_date)
+                ]
             both_side = player_stats[player_stats["side"] == "Both"]
             for team in teams:
                 team_players = both_side[both_side["team"] == team].tail(50)
@@ -66,7 +78,6 @@ def calculate_elo_from_data(map_data_df, player_stats_path=None):
             pass
 
     elo = initial_ratings.copy()
-    latest_date = df["date"].max()
     team_map_count = defaultdict(int)
 
     # 逐地图更新 ELO（map-level granularity）
@@ -161,6 +172,13 @@ class HybridPlayoffPredictor:
         self.xgb_weight = hybrid_cfg["xgboost_weight"]
         self.momentum_weight = hybrid_cfg["lstm_weight"]
         self.elo_weight = hybrid_cfg["elo_weight"]
+        self.enable_form_variance = bool(hybrid_cfg.get("enable_form_variance", True))
+        self.form_variance_by_format = {
+            "BO1": float(hybrid_cfg.get("form_variance_bo1", 60)),
+            "BO3": float(hybrid_cfg.get("form_variance_bo3", 35)),
+            "BO5": float(hybrid_cfg.get("form_variance_bo5", 20)),
+        }
+        self.bo1_probability_shrink = float(hybrid_cfg.get("bo1_probability_shrink", 0.85))
 
         source_data_dir = Path(self.config["data"]["data_dir"])
         if not source_data_dir.is_absolute():
@@ -244,9 +262,18 @@ class HybridPlayoffPredictor:
             player_stats["match_date"] = player_stats["match_url"].map(url_to_date)
 
         player_stats["match_date"] = pd.to_datetime(player_stats["match_date"], errors="coerce")
+        if "match_url" in player_stats.columns:
+            url_dates = self.map_data.groupby("match_url")["date"].first().to_dict()
+            missing_dates = player_stats["match_date"].isna()
+            player_stats.loc[missing_dates, "match_date"] = (
+                player_stats.loc[missing_dates, "match_url"].map(url_dates)
+            )
         data_end_date = self.config.get("data", {}).get("data_end_date")
         if data_end_date:
-            player_stats = player_stats[player_stats["match_date"].isna() | (player_stats["match_date"] <= pd.to_datetime(data_end_date))]
+            player_stats = player_stats[
+                player_stats["match_date"].notna()
+                & (player_stats["match_date"] <= pd.to_datetime(data_end_date))
+            ]
         both_side_stats = player_stats[player_stats["side"] == "Both"].copy()
         if both_side_stats.empty:
             return empty_stats, default_stats
@@ -388,7 +415,90 @@ class HybridPlayoffPredictor:
             else:
                 self._team_stats_cache[team]["days_since_last"] = 14 / 60.0
 
+        self._add_latest_side_features_to_cache(all_teams)
+
         print(f"  [OK] Precomputed stats for {len(all_teams)} teams")
+
+    def _configured_side_feature_bases(self):
+        bases = set()
+        columns = set(self.map_data.columns)
+        names = set(self.feature_names)
+
+        for name in self.feature_names:
+            if name.startswith("team1_"):
+                base = name[len("team1_"):]
+                if f"team2_{base}" in names or f"team2_{base}" in columns:
+                    bases.add(base)
+            elif name.endswith("_diff"):
+                base = name[:-len("_diff")]
+                if f"team1_{base}" in columns and f"team2_{base}" in columns:
+                    bases.add(base)
+            elif name.endswith("_delta"):
+                base = name[:-len("_delta")]
+                if f"team1_{base}" in columns and f"team2_{base}" in columns:
+                    bases.add(base)
+            elif name == "world_rank_diff":
+                if "team1_world_rank" in columns and "team2_world_rank" in columns:
+                    bases.add("world_rank")
+
+        return sorted(bases)
+
+    def _add_latest_side_features_to_cache(self, teams):
+        bases = self._configured_side_feature_bases()
+        if not bases:
+            return
+
+        for team in teams:
+            team_stats = self._team_stats_cache.setdefault(team, {})
+            for base in bases:
+                if base in team_stats:
+                    continue
+
+                pieces = []
+                col1 = f"team1_{base}"
+                col2 = f"team2_{base}"
+                if col1 in self.map_data.columns:
+                    left = self.map_data.loc[self.map_data["team1"] == team, ["date", col1]].rename(columns={col1: "value"})
+                    pieces.append(left)
+                if col2 in self.map_data.columns:
+                    right = self.map_data.loc[self.map_data["team2"] == team, ["date", col2]].rename(columns={col2: "value"})
+                    pieces.append(right)
+                if not pieces:
+                    continue
+
+                values = pd.concat(pieces, ignore_index=True)
+                values["value"] = pd.to_numeric(values["value"], errors="coerce")
+                values = values.dropna(subset=["value"]).sort_values("date")
+                if not values.empty:
+                    team_stats[base] = float(values.iloc[-1]["value"])
+
+    def _fill_configured_pair_features(self, features, team1_stats, team2_stats):
+        for base in self._configured_side_feature_bases():
+            k1 = f"team1_{base}"
+            k2 = f"team2_{base}"
+            if k1 not in features:
+                features[k1] = float(team1_stats.get(base, 0.0))
+            if k2 not in features:
+                features[k2] = float(team2_stats.get(base, 0.0))
+
+    def _fill_configured_diff_features(self, features):
+        for name in self.feature_names:
+            if name in features:
+                continue
+            if name == "world_rank_diff":
+                if "team1_world_rank" in features and "team2_world_rank" in features:
+                    features[name] = float(features["team2_world_rank"]) - float(features["team1_world_rank"])
+                continue
+            if name.endswith("_diff"):
+                base = name[:-len("_diff")]
+            elif name.endswith("_delta"):
+                base = name[:-len("_delta")]
+            else:
+                continue
+            k1 = f"team1_{base}"
+            k2 = f"team2_{base}"
+            if k1 in features and k2 in features:
+                features[name] = float(features[k1]) - float(features[k2])
 
     def _build_roster_lookup(self):
         """Build roster-per-match DataFrame from player_stats for stability calc."""
@@ -402,9 +512,13 @@ class HybridPlayoffPredictor:
 
         ps = pd.read_csv(ps_path, on_bad_lines="skip")
         ps["match_date"] = pd.to_datetime(ps.get("match_date", ""), errors="coerce")
+        if "match_url" in ps.columns:
+            url_dates = self.map_data.groupby("match_url")["date"].first().to_dict()
+            missing_dates = ps["match_date"].isna()
+            ps.loc[missing_dates, "match_date"] = ps.loc[missing_dates, "match_url"].map(url_dates)
         data_end_date = self.config.get("data", {}).get("data_end_date")
         if data_end_date:
-            ps = ps[ps["match_date"].isna() | (ps["match_date"] <= pd.to_datetime(data_end_date))]
+            ps = ps[ps["match_date"].notna() & (ps["match_date"] <= pd.to_datetime(data_end_date))]
         both_ps = ps[ps["side"] == "Both"].copy() if "side" in ps.columns else ps.copy()
 
         roster_per_match = (
@@ -566,6 +680,7 @@ class HybridPlayoffPredictor:
 
         for feature_name in self.map_one_hot_features:
             features[feature_name] = int(feature_name == f"map_{map_name}")
+        self._fill_configured_pair_features(features, team1_stats, team2_stats)
 
         # ── diff 特征 (team1 - team2),与 feature_engineering.build_diff_features 完全一致 ──
         # 选手 diffs
@@ -581,6 +696,7 @@ class HybridPlayoffPredictor:
             features[f"{stat}_diff"] = float(features.get(f"team1_{stat}", 0.5)) - float(features.get(f"team2_{stat}", 0.5))
         # 休息天数 diff
         features["days_since_last_diff"] = float(features.get("team1_days_since_last", 14/60.0)) - float(features.get("team2_days_since_last", 14/60.0))
+        self._fill_configured_diff_features(features)
 
         return pd.DataFrame([{feature_name: features.get(feature_name, 0.0) for feature_name in self.feature_names}])
 
@@ -592,9 +708,64 @@ class HybridPlayoffPredictor:
             return float(self.calibrator.transform([raw_prob])[0])
         return raw_prob
 
-    def predict_map_hybrid(self, team1, team2, map_name, series_state, elo_team1=1500, elo_team2=1500):
+    @staticmethod
+    def _elo_probability(elo_team1, elo_team2):
+        return 1 / (1 + 10 ** ((elo_team2 - elo_team1) / 400))
+
+    @staticmethod
+    def _probability_to_elo_delta(probability):
+        probability = float(np.clip(probability, 0.01, 0.99))
+        return 400 * np.log10(probability / (1 - probability))
+
+    @staticmethod
+    def _elo_delta_to_probability(delta):
+        return 1 / (1 + 10 ** (-delta / 400))
+
+    def _apply_match_format_variance(self, probability, match_type):
+        adjusted = float(np.clip(probability, 0.01, 0.99))
+
+        if match_type == "BO1":
+            adjusted = 0.5 + (adjusted - 0.5) * self.bo1_probability_shrink
+
+        if not self.enable_form_variance:
+            return adjusted
+
+        variance = self.form_variance_by_format.get(match_type, self.form_variance_by_format["BO3"])
+        if variance <= 0:
+            return adjusted
+
+        # The ELO Swiss model adds independent form noise to both teams.
+        # In probability space that is equivalent to noise on the ELO gap.
+        elo_delta = self._probability_to_elo_delta(adjusted)
+        elo_delta += float(np.random.normal(0, np.sqrt(2) * variance))
+        return float(self._elo_delta_to_probability(elo_delta))
+
+    def predict_map_hybrid(
+        self,
+        team1,
+        team2,
+        map_name,
+        series_state,
+        elo_team1=1500,
+        elo_team2=1500,
+        apply_form_variance=True,
+    ):
         ml_prob = self.predict_map_ml(team1, team2, map_name, series_state)
-        return float(np.clip(ml_prob, 0.05, 0.95))
+        elo_prob = self._elo_probability(elo_team1, elo_team2)
+
+        # Momentum is already present in the XGBoost features, so its configured
+        # weight is folded into the ML side instead of counted a second time.
+        ml_weight = self.xgb_weight + self.momentum_weight
+        total_weight = ml_weight + self.elo_weight
+        if total_weight <= 0:
+            mixed_prob = ml_prob
+        else:
+            mixed_prob = (ml_prob * ml_weight + elo_prob * self.elo_weight) / total_weight
+
+        match_type = series_state.get("match_type", "BO3")
+        if apply_form_variance:
+            mixed_prob = self._apply_match_format_variance(mixed_prob, match_type)
+        return float(np.clip(mixed_prob, 0.05, 0.95))
 
     @staticmethod
     def _calculate_team1_win_streak(map_results):
@@ -827,7 +998,15 @@ class HybridPlayoffPredictor:
                         "team1_win_streak": 0,
                         "picker": map_info.get("picker", "unknown"),
                     }
-                    p = self.predict_map_hybrid(t1, t2, map_name, ss, elo1, elo2)
+                    p = self.predict_map_hybrid(
+                        t1,
+                        t2,
+                        map_name,
+                        ss,
+                        elo1,
+                        elo2,
+                        apply_form_variance=False,
+                    )
                     p = float(np.clip(p + side_adv, 0.05, 0.95))
                     map_probs.append(p)
                 probs.append(tuple(map_probs))

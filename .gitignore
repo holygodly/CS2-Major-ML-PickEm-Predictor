@@ -7,18 +7,23 @@ venv/
 env/
 
 # ── 运行时产物(每次跑都会重新生成,不进版本)──
-output/*.json
-output/charts/
-config_backtest.yaml          # backtest 临时生成的配置
-backtest_data/                # backtest 临时数据
+output/
+logs/
 
-# ── 本地训练数据 ──
+# ── 实验/消融记录 ──
+experiments/
+
+# ── 本地训练数据（生成文件，不进版本；样例文件 *.example.* 保留）──
 data/*.csv
+data/*.json
 data/*.txt
-# 训练产物
+!data/*.example.*
+
+# ── 训练产物 ──
 models/*.json
 models/*.pkl
 models/*.csv
+models/*.png
 
 # ── 系统 ──
 .DS_Store

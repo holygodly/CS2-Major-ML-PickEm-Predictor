@@ -1,0 +1,22 @@
+{
+  "https://example.com/matches/1000001": {
+    "match_id": "1000001",
+    "index": 1,
+    "type": "BO3",
+    "team1": "Team A",
+    "team2": "Team B",
+    "team1_score": 2,
+    "team2_score": 1,
+    "date": "2025-11-21",
+    "details": {
+      "match_date": "2025-11-21",
+      "is_lan": true,
+      "event_name": "Example Tournament 2025",
+      "event_id": "evt_0001",
+      "stage": "Playoffs",
+      "team1_world_rank": 5,
+      "team2_world_rank": 12,
+      "total_maps": 3
+    }
+  }
+}

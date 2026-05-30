@@ -1,0 +1,5 @@
+snapshot_date,region,standing,points,team_name,roster
+2025-08-01,global,1,1900,Team A,"player_a1, player_a2, player_a3, player_a4, player_a5"
+2025-08-01,global,2,1750,Team B,"player_b1, player_b2, player_b3, player_b4, player_b5"
+2025-08-01,global,3,1600,Team C,"player_c1, player_c2, player_c3, player_c4, player_c5"
+2025-08-01,global,4,1480,Team D,"player_d1, player_d2, player_d3, player_d4, player_d5"

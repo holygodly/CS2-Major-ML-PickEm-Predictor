@@ -1,0 +1,5 @@
+match_id,match_index,match_date,match_type,team1,team2,team,player_id,player_name,map_name,side,kills,deaths,plus_minus,adr,kast,rating,match_url
+1000001,1,2025-11-21,BO3,Team A,Team B,Team A,1,player_a1,All maps,Both,55,42,13,82.5,72.0,1.18,https://example.com/matches/1000001
+1000001,1,2025-11-21,BO3,Team A,Team B,Team A,2,player_a2,All maps,Both,48,45,3,75.0,70.0,1.05,https://example.com/matches/1000001
+1000001,1,2025-11-21,BO3,Team A,Team B,Team B,6,player_b1,All maps,Both,44,50,-6,70.0,66.0,0.95,https://example.com/matches/1000001
+1000001,1,2025-11-21,BO3,Team A,Team B,Team B,7,player_b2,All maps,Both,40,52,-12,66.0,63.0,0.88,https://example.com/matches/1000001

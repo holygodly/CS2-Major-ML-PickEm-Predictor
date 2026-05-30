@@ -70,7 +70,7 @@ def select_best_gpu(gpus: List[GPUInfo], min_free_mb: float = 2000) -> Optional[
         gpus: GPU 列表
         min_free_mb: 最低可用显存阈值 (MB)，低于此值的 GPU 视为不可用
     """
-    candidates = [g for g in gpus if g.free_memory_mb >= min_free_mb and g.free_ratio > 0.2]
+    candidates = [g for g in gpus if g.free_memory_mb >= min_free_mb]
     if not candidates:
         return None
     # 按可用显存降序，利用率升序

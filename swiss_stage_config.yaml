@@ -12,29 +12,29 @@
 #   Edit these matchups directly when the official schedule is announced.
 
 seeded_teams:
-  - FURIA
-  - Vitality
-  - Falcons
-  - The MongolZ
-  - MOUZ
-  - Spirit
-  - G2
-  - paiN
-  - Natus Vincere
-  - FaZe
-  - B8
-  - Imperial
-  - PARIVISION
-  - Liquid
-  - Passion UA
-  - 3DMAX
+  - Team1
+  - Team2
+  - Team4
+  - Team7
+  - Team3
+  - Team14
+  - Team5
+  - Team8
+  - Team10
+  - Team6
+  - Team13
+  - Team9
+  - Team11
+  - Team12
+  - Team15
+  - Team16
 
 round1_matchups:
-  - [FURIA, Natus Vincere]
-  - [Vitality, FaZe]
-  - [Falcons, B8]
-  - [The MongolZ, Imperial]
-  - [MOUZ, PARIVISION]
-  - [Spirit, Liquid]
-  - [G2, Passion UA]
-  - [paiN, 3DMAX]
+  - [Team1, Team9]
+  - [Team2, Team10]
+  - [Team3, Team11]
+  - [Team4, Team12]
+  - [Team5, Team13]
+  - [Team6, Team14]
+  - [Team7, Team15]
+  - [Team8, Team16]

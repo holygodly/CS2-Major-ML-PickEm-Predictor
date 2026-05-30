@@ -13,7 +13,6 @@ side bias, and ELO fallback from the hybrid predictor.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from collections import defaultdict
 from datetime import datetime
@@ -52,32 +51,13 @@ PAIRING_PRIORITY = [
 
 def load_swiss_reference():
     root_dir = Path(__file__).resolve().parents[1]
-    reference_path = root_dir / "cs2_major_prediction_system" / "cs2_swiss_predictor_cpu.py"
-
-    if not reference_path.exists():
-        return {
-            "root_dir": root_dir,
-            "seeded_teams": [],
-            "teams": [],
-            "round1_matchups": [],
-            "team_seeds": {},
-            "source": "config.yaml (reference file not found)",
-        }
-
-    spec = importlib.util.spec_from_file_location("swiss_reference", reference_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-
-    seeded_teams = list(module.SEEDED_TEAMS)
-    round1_matchups = list(module.ROUND1_MATCHUPS)
     return {
         "root_dir": root_dir,
-        "seeded_teams": seeded_teams,
-        "teams": list(module.TEAMS),
-        "round1_matchups": round1_matchups,
-        "team_seeds": {team: idx + 1 for idx, team in enumerate(seeded_teams)},
-        "source": str(reference_path),
+        "seeded_teams": [],
+        "teams": [],
+        "round1_matchups": [],
+        "team_seeds": {},
+        "source": "config.yaml",
     }
 
 
@@ -169,19 +149,8 @@ def load_num_simulations(root_dir, main_config=None):
                 if int_val > 0:
                     return int_val
             except (ValueError, TypeError):
-                pass  # 'auto' or invalid → fall through
-
-    batch_config_path = root_dir / "cs2_major_prediction_system" / "batchsize.yaml"
-    if not batch_config_path.exists():
-        return 500
-
-    try:
-        with batch_config_path.open("r", encoding="utf-8") as file:
-            config = yaml.safe_load(file) or {}
-        val = int(config.get("simulation", {}).get("num_simulations", 500))
-        return val if val > 0 else 500
-    except Exception:
-        return 500
+                pass
+    return 500
 
 
 def choose_round_2_3_pairs(teams, match_history):
@@ -363,8 +332,13 @@ class SwissMLRunner:
             )
 
         for round_num in range(2, 6):
+            round_records = records.copy()
+            round_match_history = {
+                team: opponents.copy()
+                for team, opponents in match_history.items()
+            }
             grouped_teams = defaultdict(list)
-            for team, (wins, losses) in records.items():
+            for team, (wins, losses) in round_records.items():
                 if wins < 3 and losses < 3:
                     grouped_teams[(wins, losses)].append(team)
 
@@ -372,16 +346,21 @@ class SwissMLRunner:
                 break
 
             for record_key, teams in grouped_teams.items():
-                ordered_teams = get_buchholz_sorted_groups(records, match_history, teams, self.team_seeds)
+                ordered_teams = get_buchholz_sorted_groups(
+                    round_records,
+                    round_match_history,
+                    teams,
+                    self.team_seeds,
+                )
 
                 if round_num in (2, 3):
-                    pairs = choose_round_2_3_pairs(ordered_teams, match_history)
+                    pairs = choose_round_2_3_pairs(ordered_teams, round_match_history)
                 else:
-                    pairs = choose_round_4_5_pairs(ordered_teams, match_history)
+                    pairs = choose_round_4_5_pairs(ordered_teams, round_match_history)
 
                 for team1, team2 in pairs:
-                    wins1, losses1 = records[team1]
-                    wins2, losses2 = records[team2]
+                    wins1, losses1 = round_records[team1]
+                    wins2, losses2 = round_records[team2]
                     is_elimination_or_advancement = (
                         wins1 == 2 or losses1 == 2 or wins2 == 2 or losses2 == 2
                     )
@@ -425,10 +404,17 @@ class SwissMLRunner:
 
     def run(self, num_simulations=None):
         total_simulations = num_simulations or self.num_simulations
+        simulation_cfg = self.config.get("simulation", {})
+        swiss_backend = str(simulation_cfg.get("swiss_backend", "gpu")).strip().lower()
+        pickem_backend = str(simulation_cfg.get("pickem_backend", "gpu")).strip().lower()
+        require_gpu = bool(simulation_cfg.get("require_gpu", True))
+
         print("=" * 72)
         print("CS2 Major Swiss Stage ML Prediction")
         print("=" * 72)
         print(f"Simulations: {total_simulations:,}")
+        print(f"Swiss backend: {swiss_backend}")
+        print(f"Pick'em backend: {pickem_backend}")
         print(f"Rules source: {self.reference['source']}")
         print(f"Round 1 source: {self.setup['source']}")
         print()
@@ -444,45 +430,76 @@ class SwissMLRunner:
         for idx, (team1, team2) in enumerate(self.round1_matchups, start=1):
             print(f"  Match {idx}: {team1} vs {team2}")
 
-        probabilities = defaultdict(lambda: {"3-0": 0, "qualified": 0, "0-3": 0, "total": 0})
         all_simulations = []
         round_matchup_counts = {round_num: defaultdict(int) for round_num in range(1, 6)}
         round_bo_counts = {round_num: defaultdict(int) for round_num in range(1, 6)}
         round_map_counts = {round_num: defaultdict(int) for round_num in range(1, 6)}
 
-        for sim_idx in range(total_simulations):
-            if (sim_idx + 1) % 100 == 0:
-                print(f"  Completed {sim_idx + 1:,}/{total_simulations:,}")
+        if swiss_backend == "gpu":
+            from swiss_simulator_gpu import SwissSimulatorGPU
 
-            summary, round_logs = self.simulate_one_swiss()
-            all_simulations.append(summary)
+            simulator = SwissSimulatorGPU(self.predictor, self.teams)
+            if simulator.backend != "gpu":
+                message = (
+                    f"Swiss backend requested GPU, but active backend is {simulator.backend}. "
+                    "Install/enable CUDA PyTorch or set simulation.swiss_backend: 'cpu' explicitly."
+                )
+                if require_gpu:
+                    raise RuntimeError(message)
+                print(f"  [CPU WARNING] {message}")
 
-            for team in self.teams:
-                probabilities[team]["total"] += 1
-                if team in summary["3-0"]:
-                    probabilities[team]["3-0"] += 1
-                    probabilities[team]["qualified"] += 1
-                elif team in summary["qualified"]:
-                    probabilities[team]["qualified"] += 1
-                elif team in summary["0-3"]:
-                    probabilities[team]["0-3"] += 1
+            final_probabilities, all_simulations = simulator.simulate(
+                self.round1_matchups,
+                num_sims=total_simulations,
+            )
+            for round_num, counter in getattr(simulator, "round_matchup_counts", {}).items():
+                round_matchup_counts[round_num].update(counter)
+            for round_num, counter in getattr(simulator, "round_bo_counts", {}).items():
+                round_bo_counts[round_num].update(counter)
+            for team, stats in final_probabilities.items():
+                stats["3-1-or-3-2"] = stats["qualified"] - stats["3-0"]
 
-            for entry in round_logs:
-                matchup_key = tuple(sorted([entry["team1"], entry["team2"]]))
-                round_matchup_counts[entry["round"]][matchup_key] += 1
-                round_bo_counts[entry["round"]][entry["bo_format"]] += 1
-                for map_name in entry["maps"]:
-                    round_map_counts[entry["round"]][map_name] += 1
+        elif swiss_backend == "cpu":
+            print()
+            print("[CPU WARNING] You explicitly selected simulation.swiss_backend='cpu'.")
+            print("[CPU WARNING] Swiss simulation will run as a Python loop and can be very slow.")
 
-        final_probabilities = {}
-        for team, stats in probabilities.items():
-            total = stats["total"] or 1
-            final_probabilities[team] = {
-                "3-0": stats["3-0"] / total,
-                "qualified": stats["qualified"] / total,
-                "0-3": stats["0-3"] / total,
-                "3-1-or-3-2": (stats["qualified"] - stats["3-0"]) / total,
-            }
+            probabilities = defaultdict(lambda: {"3-0": 0, "qualified": 0, "0-3": 0, "total": 0})
+            for sim_idx in range(total_simulations):
+                if (sim_idx + 1) % 100 == 0:
+                    print(f"  Completed {sim_idx + 1:,}/{total_simulations:,}")
+
+                summary, round_logs = self.simulate_one_swiss()
+                all_simulations.append(summary)
+
+                for team in self.teams:
+                    probabilities[team]["total"] += 1
+                    if team in summary["3-0"]:
+                        probabilities[team]["3-0"] += 1
+                        probabilities[team]["qualified"] += 1
+                    elif team in summary["qualified"]:
+                        probabilities[team]["qualified"] += 1
+                    elif team in summary["0-3"]:
+                        probabilities[team]["0-3"] += 1
+
+                for entry in round_logs:
+                    matchup_key = tuple(sorted([entry["team1"], entry["team2"]]))
+                    round_matchup_counts[entry["round"]][matchup_key] += 1
+                    round_bo_counts[entry["round"]][entry["bo_format"]] += 1
+                    for map_name in entry["maps"]:
+                        round_map_counts[entry["round"]][map_name] += 1
+
+            final_probabilities = {}
+            for team, stats in probabilities.items():
+                total = stats["total"] or 1
+                final_probabilities[team] = {
+                    "3-0": stats["3-0"] / total,
+                    "qualified": stats["qualified"] / total,
+                    "0-3": stats["0-3"] / total,
+                    "3-1-or-3-2": (stats["qualified"] - stats["3-0"]) / total,
+                }
+        else:
+            raise ValueError("simulation.swiss_backend must be 'gpu' or 'cpu'")
 
         if not all_simulations:
             print("  [!] No simulations ran — cannot compute Pick'em")
@@ -490,11 +507,20 @@ class SwissMLRunner:
             success_rate = 0.0
         else:
             try:
+                if pickem_backend not in {"gpu", "cpu"}:
+                    raise ValueError("simulation.pickem_backend must be 'gpu' or 'cpu'")
+                if pickem_backend == "cpu":
+                    print()
+                    print("[CPU WARNING] You explicitly selected simulation.pickem_backend='cpu'.")
+                    print("[CPU WARNING] Pick'em brute force will not use CUDA.")
+
                 optimizer = PickemOptimizer(
                     teams=self.teams,
                     all_simulations=all_simulations,
-                    use_gpu=True,
-                    batch_size=20000,
+                    use_gpu=(pickem_backend == "gpu"),
+                    require_gpu=require_gpu and pickem_backend == "gpu",
+                    batch_size=50,
+                    device_id=getattr(self.predictor.device_mgr, "cuda_device_id", None),
                 )
                 recommendation, success_rate = optimizer.run()
                 if recommendation is None:
@@ -536,6 +562,7 @@ class SwissMLRunner:
         print()
         print("Pick'Em Recommendation (ML Swiss)")
         print("-" * 72)
+        print("  Rule: Adv slot counts 3-1/3-2 only; 3-0 must be picked in 3-0.")
         print(f"  3-0 : {', '.join(recommendation['3-0'])}")
         print(f"  Adv : {', '.join(recommendation['advances'])}")
         print(f"  0-3 : {', '.join(recommendation['0-3'])}")
@@ -584,15 +611,16 @@ class SwissMLRunner:
         print()
         print(f"Saved to: {output_path.resolve()}")
 
-        # 生成图表；失败不影响预测结果。
-        try:
-            from generate_charts import generate_all as _gen_charts
-            charts_dir = output_path.parent / "charts"
-            print()
-            print("Generating visualization charts...")
-            _gen_charts(output_path, charts_dir)
-        except Exception as exc:
-            print(f"[WARN] Chart generation failed (non-fatal): {exc}")
+        if self.config.get("output", {}).get("generate_charts", True):
+            # 生成图表；失败不影响预测结果。
+            try:
+                from generate_charts import generate_all as _gen_charts
+                charts_dir = output_path.parent / "charts"
+                print()
+                print("Generating visualization charts...")
+                _gen_charts(output_path, charts_dir)
+            except Exception as exc:
+                print(f"[WARN] Chart generation failed (non-fatal): {exc}")
 
         return output
 

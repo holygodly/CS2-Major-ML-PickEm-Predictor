@@ -65,15 +65,27 @@ class MapLevelDataPreparation:
             print(f"  ✓ 加载 {player_file.name}: {len(df)} 条")
 
         self.player_stats = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
-        # 按 data_end_date 过滤选手数据，防止未来数据泄露
+        # 按 data_end_date 过滤选手数据，防止未来数据泄露。
+        # 日期无法确认的行不能用于回测；prior stage 会由 runner 先补日期。
         data_end_date = self.config.get("data", {}).get("data_end_date")
         if data_end_date:
             self.player_stats["match_date"] = pd.to_datetime(
                 self.player_stats.get("match_date", ""), errors="coerce"
             )
+            url_dates = {}
+            for url, item in (self.match_details or {}).items():
+                parsed = pd.to_datetime(item.get("date"), errors="coerce")
+                if pd.notna(parsed):
+                    url_dates[url] = parsed
+            if "match_url" in self.player_stats.columns and url_dates:
+                missing_dates = self.player_stats["match_date"].isna()
+                self.player_stats.loc[missing_dates, "match_date"] = (
+                    self.player_stats.loc[missing_dates, "match_url"].map(url_dates)
+                )
             before = len(self.player_stats)
             self.player_stats = self.player_stats[
-                self.player_stats["match_date"].isna() | (self.player_stats["match_date"] <= pd.to_datetime(data_end_date))
+                self.player_stats["match_date"].notna()
+                & (self.player_stats["match_date"] <= pd.to_datetime(data_end_date))
             ].reset_index(drop=True)
             print(f"  ✓ 总选手数据: {len(self.player_stats)} 条（排除截止日后 {before - len(self.player_stats)} 条）")
         else:
@@ -140,11 +152,18 @@ class MapLevelDataPreparation:
             data_end_date = pd.to_datetime(data_end_date)
             print(f"  数据截止日期: {data_end_date.date()}（之后的比赛全部排除）")
 
+        # 过滤无选手数据的比赛（表演赛/弃权/forfeit）
+        ps_urls = set(self.player_stats['match_url'].dropna().unique()) if self.player_stats is not None else set()
+        excluded_no_stats = 0
+
         map_count = 0
         skipped_count = 0
         excluded_by_date = 0
 
         for match_url, match_data in self.match_details.items():
+            if ps_urls and match_url not in ps_urls:
+                excluded_no_stats += 1
+                continue
             try:
                 match_type = match_data["type"]
                 team1 = match_data["team1"]
@@ -230,6 +249,18 @@ class MapLevelDataPreparation:
                         "team1_rounds": map_info.get("team1_rounds", score1),
                         "team2_rounds": map_info.get("team2_rounds", score2),
                         "is_lan": details.get("is_lan"),
+                        "team1_vrs_points_raw": (details.get("vrs_data") or {}).get("team1_vrs_points"),
+                        "team2_vrs_points_raw": (details.get("vrs_data") or {}).get("team2_vrs_points"),
+                        "team1_vrs_rank_raw": (details.get("vrs_data") or {}).get("team1_vrs_rank"),
+                        "team2_vrs_rank_raw": (details.get("vrs_data") or {}).get("team2_vrs_rank"),
+                        "team1_vrs_change_raw": (details.get("vrs_data") or {}).get("team1_vrs_change"),
+                        "team2_vrs_change_raw": (details.get("vrs_data") or {}).get("team2_vrs_change"),
+                        "team1_world_rank": details.get("team1_world_rank"),
+                        "team2_world_rank": details.get("team2_world_rank"),
+                        "event_name": details.get("event_name"),
+                        "stage": details.get("stage"),
+                        "team1_lineup": details.get("team1_lineup"),
+                        "team2_lineup": details.get("team2_lineup"),
                         "is_augmented": 0,
                     }
 
@@ -246,6 +277,8 @@ class MapLevelDataPreparation:
                 print(f"  错误处理比赛 {match_url}: {e}")
 
         print(f"  ✓ 提取了 {map_count} 张地图样本")
+        if excluded_no_stats > 0:
+            print(f"  排除了 {excluded_no_stats} 场无选手数据的比赛（表演赛/弃权）")
         if excluded_by_date > 0:
             print(f"  排除了 {excluded_by_date} 场截止日期之后的比赛")
         if skipped_count > 0:
@@ -442,6 +475,11 @@ class MapLevelDataPreparation:
             if "team1_recent_win_rate" in sample and "team2_recent_win_rate" in sample:
                 f["team1_recent_win_rate"] = sample["team2_recent_win_rate"]
                 f["team2_recent_win_rate"] = sample["team1_recent_win_rate"]
+            for vrs_key in ["vrs_points_raw", "vrs_rank_raw", "vrs_change_raw"]:
+                k1, k2 = f"team1_{vrs_key}", f"team2_{vrs_key}"
+                if k1 in sample and k2 in sample:
+                    f[k1] = sample[k2]
+                    f[k2] = sample[k1]
             f["is_augmented"] = 1
             flipped.append(f)
         self.map_level_data.extend(flipped)

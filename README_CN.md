@@ -78,7 +78,6 @@ cs2-major-ml-predictor/
 ├── run_swiss_ml_prediction.py   # 瑞士轮预测入口
 ├── run_quick_prediction.py      # 淘汰赛快速预测
 ├── run_full_prediction.py       # 淘汰赛完整预测
-├── run_backtest_stages.py       # 历史 Major 回测
 ├── generate_charts.py           # 生成图表
 ├── data/                        # 数据集(流水线生成)
 ├── models/                      # 训练产物（model_training.py 生成，含 XGBoost + Isotonic 校准器）
@@ -103,7 +102,9 @@ python model_training.py
 
 ## 数据来源
 
-训练数据是我自己写的 HLTV 爬虫爬的,爬虫不方便公开,**大家可自行爬取**。数据全部来自 HLTV 比赛页(`hltv.org/matches/...`)。爬好的数据路径可在 `config.yaml` 的 `data.data_dir` 改,需要下面三个文件,字段格式如下,照着抓就行。
+训练数据是我自己写的 HLTV 爬虫爬的,爬虫不方便公开,**大家可自行爬取**。数据全部来自 HLTV 比赛页(`hltv.org/matches/...`)。爬好的数据路径可在 `config.yaml` 的 `data.data_dir` 改(默认 `./data`),需要下面三个文件,字段格式如下,照着抓就行。
+
+`data/` 目录下提供了 `*.example.*` 样例文件,展示了各文件的字段格式供参考。
 
 ### 1. `results_all_matches.csv` — 比赛列表
 

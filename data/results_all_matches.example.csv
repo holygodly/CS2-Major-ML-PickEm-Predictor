@@ -1,0 +1,7 @@
+match_id,index,type,team1,team2,team1_score,team2_score,date,url
+1000001,1,BO3,Team A,Team B,2,1,2025-11-21,https://example.com/matches/1000001
+1000002,2,BO1,Team C,Team D,1,0,2025-11-20,https://example.com/matches/1000002
+1000003,3,BO5,Team A,Team C,3,1,2025-11-19,https://example.com/matches/1000003
+1000004,4,BO3,Team E,Team F,2,0,2025-11-18,https://example.com/matches/1000004
+1000005,5,BO3,Team G,Team H,2,1,2025-11-17,https://example.com/matches/1000005
+1000006,6,BO3,Team I,Team J,0,2,2025-11-16,https://example.com/matches/1000006

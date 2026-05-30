@@ -34,7 +34,8 @@ class PickemOptimizer:
         teams: List[str],
         all_simulations: list,
         use_gpu: bool = True,
-        batch_size: int = 20000,
+        require_gpu: bool = False,
+        batch_size: int = 50,
         device_id: Optional[int] = None,
     ):
         self.teams = list(teams)
@@ -52,9 +53,17 @@ class PickemOptimizer:
                 self.device = torch.device(f"cuda:{gpu_id}")
                 self.backend = "torch_gpu"
             else:
+                if use_gpu and require_gpu:
+                    raise RuntimeError(
+                        "Pick'em optimizer requires CUDA, but PyTorch CUDA is not available."
+                    )
                 self.device = torch.device("cpu")
                 self.backend = "torch_cpu"
         else:
+            if use_gpu and require_gpu:
+                raise RuntimeError(
+                    "Pick'em optimizer requires GPU, but PyTorch is not installed."
+                )
             self.backend = "numpy"
 
         self._prepare_matrices()

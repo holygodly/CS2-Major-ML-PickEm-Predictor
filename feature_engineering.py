@@ -302,9 +302,13 @@ class FeatureEngineering:
         if ps_path.exists():
             ps = pd.read_csv(ps_path, on_bad_lines="skip")
             ps["match_date"] = pd.to_datetime(ps.get("match_date", ""), errors="coerce")
+            if "match_url" in ps.columns and self.df is not None:
+                url_dates = self.df.groupby("match_url")["date"].first().to_dict()
+                missing_dates = ps["match_date"].isna()
+                ps.loc[missing_dates, "match_date"] = ps.loc[missing_dates, "match_url"].map(url_dates)
             data_end_date = self.config.get("data", {}).get("data_end_date")
             if data_end_date:
-                ps = ps[ps["match_date"].isna() | (ps["match_date"] <= pd.to_datetime(data_end_date))]
+                ps = ps[ps["match_date"].notna() & (ps["match_date"] <= pd.to_datetime(data_end_date))]
             both_ps = ps[ps["side"] == "Both"].copy() if "side" in ps.columns else ps.copy()
 
             roster_per_match = (
@@ -519,6 +523,832 @@ class FeatureEngineering:
         print(f"    - 大赛胜率: team1/2_big_match_win_rate")
         return features
 
+    def build_elo_features(self):
+        """Build ELO-based opponent-strength features.
+
+        Computes incremental ELO ratings from historical match results so that
+        the model can distinguish between teams that beat strong opponents vs
+        teams that only beat weak ones.
+
+        K = base × format × venue × opponent_reliability:
+          - Format: BO1 → 0.8×, BO3 → 1.0× (baseline), BO5 → 1.2×
+          - Venue:  LAN → 1.3×, Online → 1.0×
+          - Reliability: both teams ≥15 matches → 1.0×, ≥5 → 0.75×, <5 → 0.5×
+
+        Side-effects: stores ``self._match_elo_snapshot`` and
+        ``self._team_match_history`` for downstream SoS / quality features.
+        """
+        print("\n[ELO] 构建对手强度特征 (incremental ELO, variable K)...")
+
+        BASE_K = 32.0
+        INIT_ELO = 1000.0
+        # BO3 is now baseline (1.0), BO1 penalized, BO5 slightly boosted.
+        # This prevents local BO3s vs weak teams from being over-weighted.
+        BO_MULT = {"BO1": 0.8, "BO3": 1.0, "BO5": 1.2}
+        # Minimum match count thresholds for opponent reliability
+        RELIABLE_MATCHES = 15
+        SEMI_RELIABLE = 5
+
+        features = []
+
+        # Work on original (non-augmented) rows only to avoid double-counting
+        has_aug = "is_augmented" in self.df.columns
+        if has_aug:
+            orig_mask = self.df["is_augmented"] == 0
+        else:
+            orig_mask = pd.Series(True, index=self.df.index)
+
+        orig_df = self.df[orig_mask].copy()
+        # Deduplicate to series level: one ELO update per series, not per map.
+        # Use the first map of each series (map_index == 0) as the anchor row.
+        series_df = orig_df[orig_df["map_index"] == 0].sort_values("date").reset_index()
+
+        elo = {}  # team → current ELO
+        match_count = {}  # team → number of series played so far
+        # match_url → (team1_elo_before, team2_elo_before)
+        match_elo_snapshot = {}
+        # team → [(date, opponent_elo_pre, won_bool, match_type, is_lan)]
+        team_match_history = {}
+
+        for _, row in series_df.iterrows():
+            t1, t2 = row["team1"], row["team2"]
+            e1 = elo.get(t1, INIT_ELO)
+            e2 = elo.get(t2, INIT_ELO)
+            match_elo_snapshot[row["match_url"]] = (e1, e2)
+
+            # ── K = base × format × venue × opponent_reliability ──
+            match_type = str(row.get("match_type", "BO1"))
+            is_lan = bool(row.get("is_lan", False)) if pd.notna(row.get("is_lan")) else False
+
+            k_format = BO_MULT.get(match_type, 1.0)
+            k_venue = 1.3 if is_lan else 1.0
+
+            # Opponent reliability: dampen K when either team's ELO is uncertain.
+            # Use BOTH match count AND ELO deviation from INIT — a team with few
+            # dataset matches but a diverged ELO is still somewhat "known".
+            mc1, mc2 = match_count.get(t1, 0), match_count.get(t2, 0)
+            dev1 = abs(e1 - INIT_ELO)
+            dev2 = abs(e2 - INIT_ELO)
+            known1 = mc1 >= RELIABLE_MATCHES or (mc1 >= SEMI_RELIABLE and dev1 > 50)
+            known2 = mc2 >= RELIABLE_MATCHES or (mc2 >= SEMI_RELIABLE and dev2 > 50)
+            if known1 and known2:
+                k_reliability = 1.0
+            elif known1 or known2:
+                k_reliability = 0.75
+            else:
+                k_reliability = 0.5
+
+            # VRS match quality weight
+            k_vrs = 1.0
+            vrs_lookup = self._load_valve_rankings_lookup()
+            if vrs_lookup is not None:
+                date_str = str(row["date"])[:10]
+                v1 = vrs_lookup.get_points(t1, date_str)
+                v2 = vrs_lookup.get_points(t2, date_str)
+                if v1 and v2:
+                    avg_vrs = (v1 + v2) / 2
+                    k_vrs = 0.8 + 0.4 * min(1.0, max(0, (avg_vrs - 1000)) / 800)
+                elif v1 or v2:
+                    k_vrs = 0.9
+                else:
+                    k_vrs = 0.7
+
+            K = BASE_K * k_format * k_venue * k_reliability * k_vrs
+
+            # Record history BEFORE updating ELO (strictly causal)
+            match_date = row["date"]
+            won = row["winner"]  # 1 = team1 won this map; approximate series winner
+            team_match_history.setdefault(t1, []).append(
+                (match_date, e2, won == 1, match_type, is_lan)
+            )
+            team_match_history.setdefault(t2, []).append(
+                (match_date, e1, won == 0, match_type, is_lan)
+            )
+
+            # ELO update
+            score1 = 1.0 if won == 1 else 0.0
+            expected1 = 1.0 / (1.0 + 10.0 ** ((e2 - e1) / 400.0))
+            elo[t1] = e1 + K * (score1 - expected1)
+            elo[t2] = e2 + K * ((1.0 - score1) - (1.0 - expected1))
+
+            # Update match counts
+            match_count[t1] = match_count.get(t1, 0) + 1
+            match_count[t2] = match_count.get(t2, 0) + 1
+
+        # Store for downstream use by build_opponent_strength_features()
+        self._match_elo_snapshot = match_elo_snapshot
+        self._team_match_history = team_match_history
+        self._elo_ratings = elo
+        self._match_count = match_count
+        self._INIT_ELO = INIT_ELO
+
+        # Map back to full dataframe via match_url
+        urls = self.df["match_url"].values
+        elo1_arr = np.full(len(self.df), INIT_ELO, dtype=np.float32)
+        elo2_arr = np.full(len(self.df), INIT_ELO, dtype=np.float32)
+
+        for i in range(len(self.df)):
+            snapshot = match_elo_snapshot.get(urls[i])
+            if snapshot is not None:
+                elo1_arr[i] = snapshot[0]
+                elo2_arr[i] = snapshot[1]
+
+        # For augmented rows (team1↔team2 swapped), flip the ELO
+        if has_aug:
+            aug_mask = self.df["is_augmented"] == 1
+            elo1_arr[aug_mask], elo2_arr[aug_mask] = (
+                elo2_arr[aug_mask].copy(),
+                elo1_arr[aug_mask].copy(),
+            )
+
+        self.df["team1_elo"] = elo1_arr
+        self.df["team2_elo"] = elo2_arr
+        self.df["elo_delta"] = elo1_arr - elo2_arr
+        features.extend(["team1_elo", "team2_elo", "elo_delta"])
+
+        # Stats
+        n_teams = len(elo)
+        elo_vals = sorted(elo.values(), reverse=True)
+        print(f"  ✓ 为 {n_teams} 支队伍计算了增量 ELO (variable K)")
+        print(f"    Top ELO: {elo_vals[0]:.0f}, Median: {elo_vals[n_teams//2]:.0f}, Bottom: {elo_vals[-1]:.0f}")
+        print(f"  ✓ 构建了 {len(features)} 个 ELO 特征")
+        return features
+
+    def _load_valve_rankings_lookup(self):
+        """Load the Valve official rankings CSV via the shared lookup utility.
+
+        Tries multiple paths relative to this script's location:
+          1. ./data/valve_rankings_global.csv  (bundled sample data)
+          2. ../HLTV/data/valve_rankings_global.csv  (local dev layout)
+          3. Configured path from config.yaml
+        Returns a ValveRankingsLookup instance or None.
+        """
+        if hasattr(self, "_vrs_lookup"):
+            return self._vrs_lookup
+
+        # Candidate paths
+        base = Path(__file__).resolve().parent
+        candidates = [
+            base / "data" / "valve_rankings_global.csv",
+            base.parent / "HLTV" / "data" / "valve_rankings_global.csv",
+        ]
+        cfg_path = self.config.get("valve_rankings_csv")
+        if cfg_path:
+            candidates.insert(0, Path(cfg_path))
+
+        csv_path = None
+        for p in candidates:
+            if p.exists():
+                csv_path = p
+                break
+
+        if csv_path is None:
+            self._vrs_lookup = None
+            return None
+
+        # Import the lookup utility
+        scripts_dir = base.parent / "HLTV" / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        try:
+            from valve_rankings_lookup import ValveRankingsLookup
+            self._vrs_lookup = ValveRankingsLookup(str(csv_path))
+            return self._vrs_lookup
+        except Exception as e:
+            print(f"  ⚠ 加载 ValveRankingsLookup 失败: {e}")
+            self._vrs_lookup = None
+            return None
+
+    def build_vrs_features(self):
+        """Build VRS (Valve Ranking System) features.
+
+        Data sources (in priority order):
+          1. Valve official rankings CSV (valve_rankings_global.csv)
+             — comprehensive: 700+ teams, 42 snapshots, 2024-08~2026-05
+          2. HLTV match-page VRS (team1_vrs_points_raw columns)
+             — sparse: only Valve-ranked events have these
+
+        For each match, we first try the Valve CSV (nearest prior snapshot).
+        If missing, fall back to HLTV match-page VRS with forward-fill.
+        This is strictly causal — only uses data available before match date.
+
+        Features produced:
+          team1_vrs_points, team2_vrs_points, vrs_points_delta
+          team1_vrs_rank, team2_vrs_rank, vrs_rank_delta
+        """
+        print("\n[VRS] 构建 Valve 排名特征 (official CSV + match-page fallback)...")
+
+        features = []
+        df = self.df
+
+        # ── Source 1: Valve official rankings CSV ──
+        vrs_lookup = self._load_valve_rankings_lookup()
+        csv_available = vrs_lookup is not None
+        if csv_available:
+            print(f"  ✓ Valve 官方排名: {len(vrs_lookup.snapshot_dates)} 期快照, {vrs_lookup.num_teams} 支队伍")
+        else:
+            print("  ⚠ 未找到 Valve 官方排名 CSV，仅使用 HLTV 比赛页 VRS")
+
+        # ── Source 2: HLTV match-page VRS (forward-fill) ──
+        has_raw = "team1_vrs_points_raw" in df.columns
+        has_aug = "is_augmented" in df.columns
+        if has_aug:
+            orig_mask = df["is_augmented"] == 0
+        else:
+            orig_mask = pd.Series(True, index=df.index)
+
+        # Build forward-fill lookup from match-page VRS
+        match_page_vrs = {}  # match_url → (t1_pts, t1_rank, t2_pts, t2_rank)
+        if has_raw:
+            orig_df = df[orig_mask].copy()
+            series_df = orig_df.drop_duplicates(subset="match_url").sort_values("date").reset_index()
+            team_vrs_ffill = {}  # team → {'points': float, 'rank': float}
+
+            for _, row in series_df.iterrows():
+                t1, t2 = row["team1"], row["team2"]
+                if pd.notna(row.get("team1_vrs_points_raw")):
+                    team_vrs_ffill[t1] = {
+                        "points": float(row["team1_vrs_points_raw"]),
+                        "rank": float(row["team1_vrs_rank_raw"]) if pd.notna(row.get("team1_vrs_rank_raw")) else np.nan,
+                    }
+                if pd.notna(row.get("team2_vrs_points_raw")):
+                    team_vrs_ffill[t2] = {
+                        "points": float(row["team2_vrs_points_raw"]),
+                        "rank": float(row["team2_vrs_rank_raw"]) if pd.notna(row.get("team2_vrs_rank_raw")) else np.nan,
+                    }
+                v1 = team_vrs_ffill.get(t1, {})
+                v2 = team_vrs_ffill.get(t2, {})
+                match_page_vrs[row["match_url"]] = (
+                    v1.get("points", np.nan), v1.get("rank", np.nan),
+                    v2.get("points", np.nan), v2.get("rank", np.nan),
+                )
+
+        # ── Merge: CSV primary, match-page fallback ──
+        urls = df["match_url"].values
+        t1s = df["team1"].values
+        t2s = df["team2"].values
+        dates = df["date"].values
+
+        t1_pts = np.full(len(df), np.nan, dtype=np.float32)
+        t1_rank = np.full(len(df), np.nan, dtype=np.float32)
+        t2_pts = np.full(len(df), np.nan, dtype=np.float32)
+        t2_rank = np.full(len(df), np.nan, dtype=np.float32)
+
+        csv_hits = 0
+        ffill_hits = 0
+
+        for i in range(len(df)):
+            filled = False
+
+            # Try CSV first
+            if csv_available:
+                date_str = str(dates[i])[:10]
+                info1 = vrs_lookup.get(str(t1s[i]), date_str)
+                info2 = vrs_lookup.get(str(t2s[i]), date_str)
+                if info1 is not None:
+                    t1_pts[i] = info1["points"]
+                    t1_rank[i] = info1["standing"]
+                if info2 is not None:
+                    t2_pts[i] = info2["points"]
+                    t2_rank[i] = info2["standing"]
+                if info1 is not None and info2 is not None:
+                    csv_hits += 1
+                    filled = True
+
+            # Fall back to match-page VRS if CSV didn't cover both teams
+            if not filled and has_raw:
+                snap = match_page_vrs.get(urls[i])
+                if snap is not None:
+                    if np.isnan(t1_pts[i]) and not np.isnan(snap[0]):
+                        t1_pts[i] = snap[0]
+                    if np.isnan(t1_rank[i]) and not np.isnan(snap[1]):
+                        t1_rank[i] = snap[1]
+                    if np.isnan(t2_pts[i]) and not np.isnan(snap[2]):
+                        t2_pts[i] = snap[2]
+                    if np.isnan(t2_rank[i]) and not np.isnan(snap[3]):
+                        t2_rank[i] = snap[3]
+                    if np.isfinite(t1_pts[i]) and np.isfinite(t2_pts[i]):
+                        ffill_hits += 1
+
+        # For augmented rows, swap team1↔team2
+        if has_aug:
+            aug_mask = df["is_augmented"] == 1
+            t1_pts[aug_mask], t2_pts[aug_mask] = t2_pts[aug_mask].copy(), t1_pts[aug_mask].copy()
+            t1_rank[aug_mask], t2_rank[aug_mask] = t2_rank[aug_mask].copy(), t1_rank[aug_mask].copy()
+
+        df["team1_vrs_points"] = t1_pts
+        df["team2_vrs_points"] = t2_pts
+        df["vrs_points_delta"] = t1_pts - t2_pts
+        df["team1_vrs_rank"] = t1_rank
+        df["team2_vrs_rank"] = t2_rank
+        df["vrs_rank_delta"] = t1_rank - t2_rank
+
+        features.extend([
+            "team1_vrs_points", "team2_vrs_points", "vrs_points_delta",
+            "team1_vrs_rank", "team2_vrs_rank", "vrs_rank_delta",
+        ])
+
+        # Stats
+        has_vrs = np.isfinite(t1_pts) & np.isfinite(t2_pts)
+        n_with = int(has_vrs.sum())
+        n_total = len(df)
+        pct = 100.0 * n_with / n_total if n_total > 0 else 0
+        print(f"  ✓ {n_with}/{n_total} 行有 VRS 特征 ({pct:.1f}%)")
+        if csv_available:
+            print(f"    - Valve CSV 命中: {csv_hits} 行")
+        if has_raw:
+            print(f"    - HLTV 比赛页补充: {ffill_hits} 行")
+        print(f"  ✓ 构建了 {len(features)} 个 VRS 特征")
+        return features
+
+    def build_opponent_strength_features(self):
+        """Build Strength-of-Schedule and quality-adjusted features.
+
+        Requires ``build_elo_features()`` to have run first so that
+        ``self._team_match_history`` and ``self._match_elo_snapshot`` exist.
+
+        For each match, looks back 180 days per team and computes:
+          - sos_6m:           avg opponent ELO (Strength of Schedule)
+          - qa_winrate_6m:    win rate weighted by opponent ELO
+          - strong_winrate_6m: win rate vs opponents with ELO > median
+          - weak_farm_ratio_6m: fraction of matches vs low-ELO opponents
+          - best_win_elo_6m:  highest opponent ELO among wins
+          - worst_loss_elo_6m: lowest opponent ELO among losses
+          - elo_uncertainty:  1 / sqrt(quality_match_count) — fewer quality
+                               matches → higher uncertainty
+        All features are strictly causal (only use pre-match data).
+        """
+        print("\n[SoS] 构建对手强度 / 赛程质量特征...")
+
+        if not hasattr(self, "_team_match_history"):
+            print("  ⚠ 未找到 ELO 历史数据（请先运行 build_elo_features），跳过")
+            return []
+
+        features = []
+        INIT_ELO = self._INIT_ELO
+        WINDOW_DAYS = 180
+
+        # Fixed thresholds based on ELO scale — no leakage from future data.
+        # "Strong" = consistently above average; "Weak" = well below average.
+        STRONG_THRESHOLD = INIT_ELO + 50   # 1050
+        WEAK_THRESHOLD = INIT_ELO - 100    # 900
+        # "Known" opponent = ELO has diverged enough OR has enough matches.
+        # Many opponents have few dataset matches (scraping focused on Major teams)
+        # but their ELO may still be meaningful if it moved away from INIT.
+        KNOWN_MIN_MATCHES = 5
+        KNOWN_ELO_DEVIATION = 50  # |elo - 1000| > 50 → system has a signal
+
+        has_aug = "is_augmented" in self.df.columns
+        if has_aug:
+            orig_mask = self.df["is_augmented"] == 0
+        else:
+            orig_mask = pd.Series(True, index=self.df.index)
+
+        orig_df = self.df[orig_mask].copy()
+        series_df = orig_df[orig_df["map_index"] == 0].sort_values("date").reset_index()
+
+        # Rebuild walking history + running match count per team
+        team_hist_walk = {}   # team → [(date, opp_elo, won, mt, lan, opp_mc)]
+
+        # match_url → tuple of 10 stats per team (20 total)
+        match_sos_snapshot = {}
+
+        N_STATS = 10  # features per team
+
+        def _compute_sos_for_team(team, match_date):
+            """Compute SoS features using matches strictly before match_date."""
+            hist = team_hist_walk.get(team, [])
+            if not hist:
+                return (np.nan,) * N_STATS
+
+            cutoff = match_date - pd.Timedelta(days=WINDOW_DAYS)
+            window = [r for r in hist if r[0] >= cutoff and r[0] < match_date]
+
+            if not window:
+                return (np.nan,) * N_STATS
+
+            opp_elos = np.array([r[1] for r in window], dtype=np.float64)
+            wins = np.array([r[2] for r in window], dtype=np.float64)
+            opp_mcs = np.array([r[5] for r in window], dtype=np.float64)
+
+            # 1) Strength of Schedule — mean opponent ELO
+            sos = float(np.mean(opp_elos))
+
+            # 2) Quality-adjusted win rate (wins weighted by opponent ELO)
+            total_weight = float(np.sum(opp_elos))
+            qa_winrate = float(np.sum(wins * opp_elos)) / total_weight if total_weight > 0 else 0.5
+
+            # 3) Win rate vs strong opponents (ELO > fixed threshold)
+            strong_mask = opp_elos > STRONG_THRESHOLD
+            strong_wr = float(wins[strong_mask].mean()) if strong_mask.sum() > 0 else np.nan
+
+            # 4) Weak opponent farm ratio
+            weak_mask = opp_elos < WEAK_THRESHOLD
+            weak_farm = float(weak_mask.sum()) / len(window)
+
+            # 5) Best win ELO
+            win_elos = opp_elos[wins.astype(bool)]
+            best_win = float(np.max(win_elos)) if len(win_elos) > 0 else np.nan
+
+            # 6) Worst loss ELO
+            loss_elos = opp_elos[~wins.astype(bool)]
+            worst_loss = float(np.min(loss_elos)) if len(loss_elos) > 0 else np.nan
+
+            # 7) Uncertainty: 1 / sqrt(quality_match_count)
+            n_quality = int((~weak_mask).sum())
+            uncertainty = 1.0 / np.sqrt(max(n_quality, 1))
+
+            # 8) Effective match count (quality-weighted)
+            #    "Known" = opponent has enough matches OR their ELO diverged from INIT.
+            #    This handles opponents with few dataset matches but meaningful ELO.
+            opp_elo_dev = np.abs(opp_elos - INIT_ELO)
+            is_known = (opp_mcs >= KNOWN_MIN_MATCHES) | (opp_elo_dev > KNOWN_ELO_DEVIATION)
+            eff_count = float(np.sum(np.where(is_known, 1.0, 0.25)))
+
+            # 9) Known opponent ratio
+            known_ratio = float(is_known.sum()) / len(window)
+
+            # 10) LAN match ratio in window
+            lan_flags = np.array([r[4] for r in window], dtype=np.float64)
+            lan_ratio = float(np.mean(lan_flags))
+
+            return (sos, qa_winrate, strong_wr, weak_farm, best_win,
+                    worst_loss, uncertainty, eff_count, known_ratio, lan_ratio)
+
+        # Walk through series chronologically
+        running_mc = {}  # team → match count so far
+        for _, row in series_df.iterrows():
+            t1, t2 = row["team1"], row["team2"]
+            e1_pre, e2_pre = self._match_elo_snapshot.get(row["match_url"], (INIT_ELO, INIT_ELO))
+            match_date = row["date"]
+
+            # Compute BEFORE adding this match (strictly causal)
+            t1_stats = _compute_sos_for_team(t1, match_date)
+            t2_stats = _compute_sos_for_team(t2, match_date)
+            match_sos_snapshot[row["match_url"]] = t1_stats + t2_stats
+
+            # Add this match to walking history
+            won = row["winner"]
+            match_type = str(row.get("match_type", "BO1"))
+            is_lan = bool(row.get("is_lan", False)) if pd.notna(row.get("is_lan")) else False
+            mc_t1 = running_mc.get(t1, 0)
+            mc_t2 = running_mc.get(t2, 0)
+            # Record opponent's match count at time of match (measures how "known" the opp is)
+            team_hist_walk.setdefault(t1, []).append(
+                (match_date, e2_pre, won == 1, match_type, is_lan, mc_t2)
+            )
+            team_hist_walk.setdefault(t2, []).append(
+                (match_date, e1_pre, won == 0, match_type, is_lan, mc_t1)
+            )
+            running_mc[t1] = mc_t1 + 1
+            running_mc[t2] = mc_t2 + 1
+
+        # Map to full dataframe
+        N = len(self.df)
+        FEAT_NAMES = [
+            "sos_6m", "qa_winrate_6m", "strong_winrate_6m",
+            "weak_farm_ratio_6m", "best_win_elo_6m", "worst_loss_elo_6m",
+            "elo_uncertainty", "eff_match_count_6m", "known_opp_ratio_6m",
+            "lan_match_ratio_6m",
+        ]
+        arrs = {}
+        for prefix in ["team1", "team2"]:
+            for fname in FEAT_NAMES:
+                arrs[f"{prefix}_{fname}"] = np.full(N, np.nan, dtype=np.float32)
+
+        urls = self.df["match_url"].values
+        for i in range(N):
+            snap = match_sos_snapshot.get(urls[i])
+            if snap is not None:
+                for j, fname in enumerate(FEAT_NAMES):
+                    arrs[f"team1_{fname}"][i] = snap[j]
+                    arrs[f"team2_{fname}"][i] = snap[N_STATS + j]
+
+        # Swap for augmented rows
+        if has_aug:
+            aug_mask = self.df["is_augmented"] == 1
+            for fname in FEAT_NAMES:
+                k1, k2 = f"team1_{fname}", f"team2_{fname}"
+                arrs[k1][aug_mask], arrs[k2][aug_mask] = (
+                    arrs[k2][aug_mask].copy(), arrs[k1][aug_mask].copy()
+                )
+
+        # Write to dataframe + create diff features
+        for fname in FEAT_NAMES:
+            k1, k2 = f"team1_{fname}", f"team2_{fname}"
+            self.df[k1] = arrs[k1]
+            self.df[k2] = arrs[k2]
+            diff_col = f"{fname}_diff"
+            self.df[diff_col] = arrs[k1] - arrs[k2]
+            features.extend([k1, k2, diff_col])
+
+        # Stats
+        has_sos = np.isfinite(arrs["team1_sos_6m"]) & np.isfinite(arrs["team2_sos_6m"])
+        n_with = int(has_sos.sum())
+        print(f"  ✓ {n_with}/{N} 行有 SoS 特征 ({100.0*n_with/N:.1f}%)")
+        print(f"  ✓ 强队阈值: {STRONG_THRESHOLD:.0f}, 弱队阈值: {WEAK_THRESHOLD:.0f} (固定, 无泄漏)")
+        print(f"  ✓ 构建了 {len(features)} 个对手强度特征 (含 diff)")
+        return features
+
+    def build_roster_reliability_features(self):
+        """Build roster age, core sample size, and team-shell risk features."""
+        print("\n[R] 构建阵容可靠性特征 (core age / core samples / shell risk)...")
+
+        features = []
+        player_stats_path = self.config["data"].get("player_stats_pattern", "player_stats.csv")
+        data_dir = Path(self.config["data"]["data_dir"])
+        ps_path = data_dir / player_stats_path
+        if not ps_path.exists():
+            print("  ! 未找到 player_stats.csv，跳过阵容可靠性特征")
+            return []
+
+        ps = pd.read_csv(ps_path, on_bad_lines="skip")
+        ps["match_date"] = pd.to_datetime(ps.get("match_date", ""), errors="coerce")
+        if "match_url" in ps.columns and self.df is not None:
+            url_dates = self.df.groupby("match_url")["date"].first().to_dict()
+            missing_dates = ps["match_date"].isna()
+            ps.loc[missing_dates, "match_date"] = ps.loc[missing_dates, "match_url"].map(url_dates)
+        data_end_date = self.config.get("data", {}).get("data_end_date")
+        if data_end_date:
+            ps = ps[ps["match_date"].notna() & (ps["match_date"] <= pd.to_datetime(data_end_date))]
+        both_ps = ps[ps["side"] == "Both"].copy() if "side" in ps.columns else ps.copy()
+        if both_ps.empty:
+            print("  ! player_stats 中没有 Both side 数据，跳过")
+            return []
+
+        both_ps["rating"] = pd.to_numeric(both_ps.get("rating", np.nan), errors="coerce")
+        roster_per_match = (
+            both_ps.groupby(["match_url", "team"])["player_name"]
+            .apply(lambda values: set(str(v) for v in values if pd.notna(v)))
+            .reset_index()
+            .rename(columns={"player_name": "roster"})
+        )
+        roster_per_match = roster_per_match.merge(
+            both_ps[["match_url", "match_date"]].drop_duplicates(),
+            on="match_url",
+            how="left",
+        )
+        roster_per_match = roster_per_match.dropna(subset=["match_date"]).sort_values("match_date")
+
+        team_roster_hist = defaultdict(list)
+        team_player_first_seen = defaultdict(dict)
+        for _, row in roster_per_match.iterrows():
+            team = row["team"]
+            match_date = row["match_date"]
+            roster = row["roster"]
+            if not roster:
+                continue
+            team_roster_hist[team].append((match_date, roster))
+            first_seen = team_player_first_seen[team]
+            for player in roster:
+                if player not in first_seen or match_date < first_seen[player]:
+                    first_seen[player] = match_date
+
+        player_hist = defaultdict(list)
+        for _, row in both_ps.dropna(subset=["match_date"]).iterrows():
+            player = str(row.get("player_name", ""))
+            if not player:
+                continue
+            player_hist[player].append((row["match_date"], row.get("rating", np.nan)))
+        for player in list(player_hist):
+            player_hist[player].sort(key=lambda item: item[0])
+
+        stat_names = [
+            "core_age_days",
+            "core_matches_90d",
+            "core_matches_180d",
+            "core_match_share_180d",
+            "new_player_count_60d",
+            "new_player_count_120d",
+            "player_experience_matches_180d",
+            "player_experience_matches_365d",
+            "player_experience_rating_180d",
+            "team_history_reliability",
+            "shell_change_risk",
+        ]
+
+        def _player_experience(roster, current_date, days):
+            cutoff = current_date - pd.Timedelta(days=days)
+            counts = []
+            ratings = []
+            for player in roster:
+                window = [
+                    (date, rating)
+                    for date, rating in player_hist.get(player, [])
+                    if cutoff <= date < current_date
+                ]
+                counts.append(len(window))
+                ratings.extend(float(rating) for _, rating in window if pd.notna(rating))
+            avg_count = float(np.mean(counts)) if counts else 0.0
+            avg_rating = float(np.mean(ratings)) if ratings else 1.0
+            return avg_count, avg_rating
+
+        def _team_roster_features(team, current_date):
+            hist = [(date, roster) for date, roster in team_roster_hist.get(team, []) if date < current_date]
+            if not hist:
+                return {
+                    "core_age_days": 0.0,
+                    "core_matches_90d": 0.0,
+                    "core_matches_180d": 0.0,
+                    "core_match_share_180d": 0.0,
+                    "new_player_count_60d": 0.0,
+                    "new_player_count_120d": 0.0,
+                    "player_experience_matches_180d": 0.0,
+                    "player_experience_matches_365d": 0.0,
+                    "player_experience_rating_180d": 1.0,
+                    "team_history_reliability": 0.0,
+                    "shell_change_risk": 0.0,
+                }
+
+            latest_roster = hist[-1][1]
+            threshold = min(3, max(len(latest_roster), 1))
+            core_hist = [(date, roster) for date, roster in hist if len(latest_roster & roster) >= threshold]
+            first_core_date = core_hist[0][0] if core_hist else hist[-1][0]
+            core_age_days = float(max((current_date - first_core_date).days, 0))
+
+            cutoff_90 = current_date - pd.Timedelta(days=90)
+            cutoff_180 = current_date - pd.Timedelta(days=180)
+            total_180 = sum(1 for date, _ in hist if cutoff_180 <= date < current_date)
+            core_90 = sum(1 for date, _ in core_hist if cutoff_90 <= date < current_date)
+            core_180 = sum(1 for date, _ in core_hist if cutoff_180 <= date < current_date)
+            core_share_180 = float(core_180 / total_180) if total_180 else 0.0
+
+            first_seen = team_player_first_seen.get(team, {})
+            new_60 = 0
+            new_120 = 0
+            for player in latest_roster:
+                seen_date = first_seen.get(player)
+                if seen_date is None:
+                    continue
+                age = (current_date - seen_date).days
+                if age <= 60:
+                    new_60 += 1
+                if age <= 120:
+                    new_120 += 1
+
+            exp_180, rating_180 = _player_experience(latest_roster, current_date, 180)
+            exp_365, _ = _player_experience(latest_roster, current_date, 365)
+            reliability = float(min(core_180 / 30.0, 1.0) * core_share_180)
+            shell_risk = float(
+                (1.0 - core_share_180)
+                * min(total_180 / 30.0, 1.0)
+                * (1.0 - min(core_180 / 20.0, 1.0))
+            )
+
+            return {
+                "core_age_days": min(core_age_days, 730.0),
+                "core_matches_90d": float(core_90),
+                "core_matches_180d": float(core_180),
+                "core_match_share_180d": core_share_180,
+                "new_player_count_60d": float(new_60),
+                "new_player_count_120d": float(new_120),
+                "player_experience_matches_180d": exp_180,
+                "player_experience_matches_365d": exp_365,
+                "player_experience_rating_180d": rating_180,
+                "team_history_reliability": reliability,
+                "shell_change_risk": shell_risk,
+            }
+
+        N = len(self.df)
+        values = {
+            f"{side}_{name}": np.zeros(N, dtype=np.float32)
+            for side in ["team1", "team2"]
+            for name in stat_names
+        }
+
+        teams1 = self.df["team1"].values
+        teams2 = self.df["team2"].values
+        dates = pd.to_datetime(self.df["date"]).values
+        for i in range(N):
+            current_date = pd.Timestamp(dates[i])
+            stats1 = _team_roster_features(teams1[i], current_date)
+            stats2 = _team_roster_features(teams2[i], current_date)
+            for name in stat_names:
+                values[f"team1_{name}"][i] = stats1[name]
+                values[f"team2_{name}"][i] = stats2[name]
+
+        for name in stat_names:
+            k1 = f"team1_{name}"
+            k2 = f"team2_{name}"
+            self.df[k1] = values[k1]
+            self.df[k2] = values[k2]
+            diff = f"{name}_diff"
+            self.df[diff] = values[k1] - values[k2]
+            features.extend([k1, k2, diff])
+
+        for side in ["team1", "team2"]:
+            weak_col = f"{side}_weak_farm_ratio_6m"
+            rel_col = f"{side}_team_history_reliability"
+            risk_col = f"{side}_farm_core_risk"
+            if weak_col in self.df.columns:
+                self.df[risk_col] = self.df[weak_col].astype(float).fillna(0.0) * (
+                    1.0 - self.df[rel_col].astype(float).fillna(0.0)
+                )
+            else:
+                self.df[risk_col] = 0.0
+            features.append(risk_col)
+        self.df["farm_core_risk_diff"] = self.df["team1_farm_core_risk"] - self.df["team2_farm_core_risk"]
+        features.append("farm_core_risk_diff")
+
+        print(f"  ✓ 构建了 {len(features)} 个阵容可靠性特征")
+        return features
+
+    def build_metadata_features(self):
+        """从比赛元数据构建特征: 世界排名、赛事质量、阵容稳定性。"""
+        print("\n[M] 构建元数据特征 (world_rank / event / lineup)...")
+
+        features = []
+
+        # ── 世界排名特征 ──
+        if "team1_world_rank" in self.df.columns:
+            # 先强制转数字（处理字符串/非法值）
+            for side in ["team1", "team2"]:
+                self.df[f"{side}_world_rank"] = pd.to_numeric(
+                    self.df[f"{side}_world_rank"], errors="coerce"
+                )
+
+            # 排名归一化: rank 1-100 → 1.0-0.0 (rank越低=越强=值越大)
+            for side in ["team1", "team2"]:
+                col = f"{side}_world_rank"
+                norm_col = f"{side}_world_rank_norm"
+                self.df[norm_col] = self.df[col].apply(
+                    lambda x: max(0.0, 1.0 - (x - 1) / 99.0) if pd.notna(x) and x > 0 else 0.5
+                )
+                features.append(norm_col)
+
+            # 排名差
+            self.df["world_rank_diff"] = (
+                self.df["team2_world_rank"].fillna(50).astype(float)
+                - self.df["team1_world_rank"].fillna(50).astype(float)
+            )
+            features.append("world_rank_diff")
+
+            # 是否 Top10 / Top30 对决
+            r1 = self.df["team1_world_rank"].fillna(999)
+            r2 = self.df["team2_world_rank"].fillna(999)
+            self.df["is_top10_matchup"] = ((r1 <= 10) & (r2 <= 10)).astype(int)
+            self.df["is_top30_matchup"] = ((r1 <= 30) & (r2 <= 30)).astype(int)
+            features.extend(["is_top10_matchup", "is_top30_matchup"])
+
+        # ── 赛事质量特征 ──
+        if "event_name" in self.df.columns:
+            # 从赛事名称判断级别
+            def event_tier(name):
+                if pd.isna(name):
+                    return 0.5
+                name_lower = str(name).lower()
+                if "major" in name_lower:
+                    return 1.0
+                elif any(kw in name_lower for kw in ["blast", "esl pro", "iem", "pgl"]):
+                    return 0.85
+                elif any(kw in name_lower for kw in ["dreamhack", "rmc", "betboom", "yalla"]):
+                    return 0.7
+                elif any(kw in name_lower for kw in ["qualifier", "rmr", "open qualifier"]):
+                    return 0.6
+                else:
+                    return 0.5
+            self.df["event_tier"] = self.df["event_name"].apply(event_tier)
+            features.append("event_tier")
+
+        # ── 阶段特征 ──
+        if "stage" in self.df.columns:
+            def stage_importance(stage):
+                if pd.isna(stage):
+                    return 0.5
+                stage_lower = str(stage).lower()
+                if any(kw in stage_lower for kw in ["final", "grand final"]):
+                    return 1.0
+                elif any(kw in stage_lower for kw in ["semifinal", "semi-final"]):
+                    return 0.9
+                elif any(kw in stage_lower for kw in ["quarterfinal", "quarter-final", "playoff"]):
+                    return 0.8
+                elif any(kw in stage_lower for kw in ["elimination", "decider"]):
+                    return 0.7
+                elif any(kw in stage_lower for kw in ["group", "swiss", "opening"]):
+                    return 0.5
+                else:
+                    return 0.5
+            self.df["stage_importance"] = self.df["stage"].apply(stage_importance)
+            features.append("stage_importance")
+
+        # ── 阵容匹配度特征（当前阵容 vs 比赛时阵容）──
+        # 计算每场比赛中，队伍当时的 lineup 有多少人在最近比赛中也出现过（阵容稳定性指标）
+        if "team1_lineup" in self.df.columns:
+            for side in ["team1", "team2"]:
+                col = f"{side}_lineup"
+                team_col = side  # "team1" or "team2"
+                stability_col = f"{side}_lineup_size"
+                # 简单特征: lineup 人数（正常=5, <5可能有替补或数据缺失）
+                self.df[stability_col] = self.df[col].apply(
+                    lambda x: len(x) if isinstance(x, list) else 0
+                )
+                features.append(stability_col)
+
+        filled = self.df[[f for f in features if f in self.df.columns]].notna().mean()
+        print(f"  ✓ 构建了 {len(features)} 个元数据特征")
+        print(f"  填充率: {filled.mean():.1%}")
+        return features
+
     def build_diff_features(self):
         """构建 team1 - team2 的 diff 特征。
 
@@ -577,6 +1407,14 @@ class FeatureEngineering:
                 - self.df["team2_days_since_last"].astype(float)
             )
             features.append("days_since_last_diff")
+
+        # 世界排名 diff（由 build_metadata_features 生成的归一化排名）
+        if "team1_world_rank_norm" in self.df.columns and "team2_world_rank_norm" in self.df.columns:
+            self.df["world_rank_norm_diff"] = (
+                self.df["team1_world_rank_norm"].astype(float)
+                - self.df["team2_world_rank_norm"].astype(float)
+            )
+            features.append("world_rank_norm_diff")
 
         print(f"  ✓ 构建了 {len(features)} 个 diff 特征")
         return features
@@ -652,6 +1490,33 @@ class FeatureEngineering:
         print(f"  ✓ 构建了 {len(features)} 个上下文特征")
         return features
 
+    def _matches_feature_filter(self, feature, patterns):
+        lower = feature.lower()
+        return any(str(pattern).lower() in lower for pattern in patterns)
+
+    def apply_feature_filter(self, features):
+        cfg = ((self.config.get("features") or {}).get("feature_filter") or {})
+        if not cfg or not cfg.get("enabled", False):
+            return features
+
+        include_patterns = cfg.get("include_patterns") or []
+        exclude_patterns = cfg.get("exclude_patterns") or []
+        kept = list(features)
+
+        if include_patterns:
+            kept = [
+                feature for feature in kept
+                if self._matches_feature_filter(feature, include_patterns)
+            ]
+        if exclude_patterns:
+            kept = [
+                feature for feature in kept
+                if not self._matches_feature_filter(feature, exclude_patterns)
+            ]
+
+        print(f"  Feature filter: {len(features)} -> {len(kept)}")
+        return kept
+
     def finalize_features(self, all_features):
         """Create and save the final feature matrix."""
         print("\n[7/7] 最终化特征集...")
@@ -660,6 +1525,8 @@ class FeatureEngineering:
         missing_features = sorted(set(all_features) - set(available_features))
         if missing_features:
             print(f"  ! 缺失特征: {missing_features}")
+
+        available_features = self.apply_feature_filter(available_features)
 
         X = self.df[available_features].copy().fillna(0)
         y = self.df["winner"].copy()
@@ -725,6 +1592,11 @@ class FeatureEngineering:
         all_features.extend(self.build_advanced_features())
         # diff 特征必须在 context 之后,因为它依赖 days_since_last
         all_features.extend(self.build_context_features())
+        all_features.extend(self.build_elo_features())
+        all_features.extend(self.build_vrs_features())
+        all_features.extend(self.build_opponent_strength_features())
+        all_features.extend(self.build_roster_reliability_features())
+        all_features.extend(self.build_metadata_features())
         all_features.extend(self.build_diff_features())
         self.finalize_features(all_features)
 
